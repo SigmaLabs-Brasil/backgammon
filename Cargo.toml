@@ -1,5 +1,5 @@
 [workspace]
-members = ["gnubg-sys", "gnubg-search", "gnubg-cli"]
+members = ["gnubg-sys", "gnubg-types", "gnubg-moves", "gnubg-search", "gnubg-cli"]
 resolver = "2"
 
 [workspace.package]

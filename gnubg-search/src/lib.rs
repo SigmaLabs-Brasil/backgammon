@@ -207,19 +207,28 @@ pub fn thread_cache_stats() -> CacheStats {
 }
 
 pub fn generate_candidate_moves(board: &Board, dice: (u8, u8)) -> Vec<Move> {
-    let candidate_count = if dice.0 == dice.1 { 8 } else { 6 };
-    (0..candidate_count)
-        .map(|id| {
-            let from = ((board.key().0[id % 10] as usize + id + dice.0 as usize) % 24 + 1) as u8;
-            let distance = if id % 2 == 0 { dice.0 } else { dice.1 };
-            let to = from.saturating_sub(distance).max(1);
-            let resulting_position = derive_child_position(board.key(), dice, id as u8, from, to);
+    // Convert gnubg_sys::PositionKey -> gnubg_types::PositionKey -> raw Board
+    let gt_key = gnubg_types::PositionKey::from_raw(board.key().0);
+    let raw_board = gnubg_types::board_from_old_key(&gt_key);
+
+    let move_list = gnubg_moves::generate_moves(&raw_board, dice);
+
+    move_list
+        .moves
+        .iter()
+        .enumerate()
+        .map(|(idx, mv)| {
+            let (from, to) = mv
+                .from_to
+                .iter()
+                .find_map(|&st| st)
+                .unwrap_or((0, 0));
             Move {
-                id,
+                id: idx,
                 dice,
                 from,
                 to,
-                resulting_position,
+                resulting_position: PositionKey(mv.key.0),
             }
         })
         .collect()
@@ -263,24 +272,6 @@ pub fn best_move(
         .into_iter()
         .max_by(|(_, a), (_, b)| a.equity.total_cmp(&b.equity))
         .ok_or(SearchError::EmptyMoveList)
-}
-
-fn derive_child_position(
-    key: PositionKey,
-    dice: (u8, u8),
-    id: u8,
-    from: u8,
-    to: u8,
-) -> PositionKey {
-    let mut child = key.0;
-    let salt = [dice.0, dice.1, id, from, to];
-    for (idx, byte) in child.iter_mut().enumerate() {
-        let mixed = salt[idx % salt.len()]
-            .wrapping_mul(31)
-            .wrapping_add(idx as u8);
-        *byte = byte.rotate_left((idx % 7) as u32) ^ mixed;
-    }
-    PositionKey(child)
 }
 
 fn hash_position_key(key: &PositionKey) -> u64 {
