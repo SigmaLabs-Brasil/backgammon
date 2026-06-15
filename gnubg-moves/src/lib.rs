@@ -316,11 +316,10 @@ fn generate_moves_sub(
     // If the player has checkers on the bar
     if board[1][24] > 0 {
         // Bar entry: roll r moves from bar (24) to point (24-r).
-        // The opponent's mirrored index for destination (24-r) is:
-        //   24 - (24 - r) = r
-        // So check board[0][r] for opponent blocking.
-        let dest_point = roll as usize; // opponent's mirrored index for entry point
-        if dest_point <= 23 && board[0][dest_point] < 2 {
+        // Check opponent blocking at index (roll-1), matching gnubg C's
+        // `anBoard[0][anRoll[nMoveDepth] - 1]` (0-indexed opponent points).
+        let opp_idx = (roll - 1) as usize;
+        if opp_idx <= 23 && board[0][opp_idx] < 2 {
             // Bar entry is possible — try it
             an_moves[n_move_depth * 2] = 24;
             an_moves[n_move_depth * 2 + 1] = 24 - roll as i8;
