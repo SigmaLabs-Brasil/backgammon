@@ -1,9 +1,0 @@
-/home/danilo/repos/backgammon-rust/target/release/deps/find_msvc_tools-957c7db70a64bd0e.d: /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/lib.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/find_tools.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/tool.rs
-
-/home/danilo/repos/backgammon-rust/target/release/deps/libfind_msvc_tools-957c7db70a64bd0e.rlib: /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/lib.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/find_tools.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/tool.rs
-
-/home/danilo/repos/backgammon-rust/target/release/deps/libfind_msvc_tools-957c7db70a64bd0e.rmeta: /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/lib.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/find_tools.rs /home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/tool.rs
-
-/home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/lib.rs:
-/home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/find_tools.rs:
-/home/danilo/.hermes/profiles/neo/home/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/find-msvc-tools-0.1.9/src/tool.rs:

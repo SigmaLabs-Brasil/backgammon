@@ -1,1 +1,0 @@
-/home/danilo/repos/backgammon-rust/target/release/libgnubg_sys.rlib: /home/danilo/repos/backgammon-rust/gnubg-sys/build.rs /home/danilo/repos/backgammon-rust/gnubg-sys/src/lib.rs /home/danilo/repos/backgammon-rust/gnubg-sys/vendor/gnubg.weights /home/danilo/repos/backgammon-rust/gnubg-sys/vendor/gnubg_bridge.c
