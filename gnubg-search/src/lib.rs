@@ -1,4 +1,10 @@
-//! Parallel root evaluation and lock-free per-thread eval cache.
+//! Parallel root evaluation, alpha-beta search, and lock-free per-thread eval cache.
+
+pub mod search;
+pub mod transposition;
+
+pub use search::*;
+pub use transposition::*;
 
 use gnubg_sys::{decode_position_id, evaluate_position_key, GnuBgError, PositionKey, RawEval};
 use rayon::prelude::*;
@@ -39,15 +45,31 @@ pub struct Move {
     pub dice: (u8, u8),
     pub from: u8,
     pub to: u8,
+    pub steps: [Option<(u8, u8)>; 4],
     pub resulting_position: PositionKey,
 }
 
 impl fmt::Display for Move {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let steps: Vec<String> = self
+            .steps
+            .iter()
+            .flatten()
+            .map(|(from, to)| {
+                if *to == 0 {
+                    format!("{from}/off")
+                } else {
+                    format!("{from}/{to}")
+                }
+            })
+            .collect();
         write!(
             f,
-            "#{} {}{} {}->{}",
-            self.id, self.dice.0, self.dice.1, self.from, self.to
+            "#{} {}{} {}",
+            self.id,
+            self.dice.0,
+            self.dice.1,
+            steps.join(" ")
         )
     }
 }
@@ -91,7 +113,7 @@ pub struct CacheStats {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TTEntry {
+struct EvalCacheEntry {
     key: PositionKey,
     eval: EvalResult,
     depth: u8,
@@ -99,7 +121,7 @@ struct TTEntry {
 
 #[derive(Debug)]
 pub struct EvalCache {
-    entries: Vec<Option<TTEntry>>,
+    entries: Vec<Option<EvalCacheEntry>>,
     mask: usize,
     lookups: u64,
     hits: u64,
@@ -140,7 +162,7 @@ impl EvalCache {
         let replace = self.entries[index].map_or(true, |entry| depth >= entry.depth);
         if replace {
             eval.cache_hit = false;
-            self.entries[index] = Some(TTEntry { key, eval, depth });
+            self.entries[index] = Some(EvalCacheEntry { key, eval, depth });
             self.inserts += 1;
         }
     }
@@ -218,20 +240,22 @@ pub fn generate_candidate_moves(board: &Board, dice: (u8, u8)) -> Vec<Move> {
         .iter()
         .enumerate()
         .map(|(idx, mv)| {
-            let (from, to) = mv
-                .from_to
-                .iter()
-                .find_map(|&st| st)
-                .unwrap_or((0, 0));
+            let (from, to) = mv.from_to.iter().find_map(|&st| st).unwrap_or((0, 0));
             Move {
                 id: idx,
                 dice,
                 from,
                 to,
+                steps: mv.from_to,
                 resulting_position: PositionKey(mv.key.0),
             }
         })
         .collect()
+}
+
+pub fn raw_board(board: &Board) -> gnubg_types::Board {
+    let gt_key = gnubg_types::PositionKey::from_raw(board.key().0);
+    gnubg_types::board_from_old_key(&gt_key)
 }
 
 pub fn parallel_eval_root(

@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use gnubg_search::{
-    best_move, evaluate_board, generate_candidate_moves, parallel_eval_root, thread_cache_stats,
-    Board, EvalResult,
+    analyze_position, best_move, evaluate_board, generate_candidate_moves, parallel_eval_root,
+    raw_board, search_position, thread_cache_stats, Board, EvalResult, Move, SearchConfig,
 };
 use mimalloc::MiMalloc;
+use std::io::{self, Write};
 use std::time::Instant;
 
 #[global_allocator]
@@ -35,6 +36,21 @@ enum Command {
         position_id: String,
         dice: String,
         #[arg(long, default_value_t = 0)]
+        depth: u8,
+    },
+    /// Analyze every dice roll from a position.
+    Analyze {
+        position_id: String,
+        #[arg(long, default_value_t = 3)]
+        depth: u8,
+        #[arg(long)]
+        time_limit: Option<u64>,
+    },
+    /// Play an interactive money-game session against the engine.
+    Play {
+        #[arg(long)]
+        color: Option<String>,
+        #[arg(long, default_value_t = 3)]
         depth: u8,
     },
     /// Run deterministic random-position evaluations and print throughput.
@@ -77,12 +93,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let moves = generate_candidate_moves(&board, dice);
             let evaluated = parallel_eval_root(&board, &moves, depth)?;
             for (candidate, eval) in &evaluated {
-                println!("candidate: {candidate} equity={:.6}", eval.equity);
+                println!(
+                    "candidate: {} equity={:.6}",
+                    format_move(candidate),
+                    eval.equity
+                );
             }
             let (mv, eval) = best_move(&board, dice, depth)?;
-            println!("best_move: {mv}");
+            println!("best_move: {}", format_move(&mv));
             print_eval(&eval);
         }
+        Command::Analyze {
+            position_id,
+            depth,
+            time_limit,
+        } => run_analyze(&position_id, depth, time_limit)?,
+        Command::Play { color, depth } => run_play(color.as_deref().unwrap_or("player"), depth)?,
         Command::Bench {
             positions,
             candidates,
@@ -90,6 +116,113 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => run_bench(positions, candidates, depth)?,
     }
     Ok(())
+}
+
+fn run_analyze(
+    position_id: &str,
+    depth: u8,
+    time_limit: Option<u64>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let board = Board::from_position_id(position_id)?;
+    let config = SearchConfig {
+        max_depth: depth,
+        time_limit_ms: time_limit.unwrap_or(0),
+        ..SearchConfig::default()
+    };
+    let result = analyze_position(&board, &config)?;
+
+    println!("position_id: {position_id}");
+    println!("depth: {depth}");
+    println!("roll      move                  equity   pv");
+    println!("──────────────────────────────────────────────────────");
+    for roll in result.rolls {
+        println!(
+            "  {:<6}  {:<20} {:+.3}   {}",
+            format_dice(roll.dice),
+            format_move_compact(&roll.best_move),
+            roll.equity,
+            format_pv(&roll.pv)
+        );
+    }
+    println!(
+        "nodes={} eval_calls={} tt_hits={}/{} time_ms={}",
+        result.stats.nodes_searched,
+        result.stats.eval_calls,
+        result.stats.tt_hits,
+        result.stats.tt_lookups,
+        result.stats.time_ms
+    );
+    Ok(())
+}
+
+fn run_play(color: &str, depth: u8) -> Result<(), Box<dyn std::error::Error>> {
+    if color != "player" && color != "opponent" {
+        return Err("--color must be 'player' or 'opponent'".into());
+    }
+
+    let mut board = Board::from_position_id("4HPwATDgc/ABMA")?;
+    let config = SearchConfig {
+        max_depth: depth,
+        ..SearchConfig::default()
+    };
+    let mut rng = SplitMix64::new(0x2930_2930_2930_2930);
+    let player_starts = color == "player";
+    let mut player_turn = player_starts;
+
+    println!("Starting interactive game. Type moves like '24/22 13/11' or 'quit'.");
+    loop {
+        println!("{}", render_board(&board));
+        if is_game_over_cli(&board) {
+            println!("game_over: all checkers borne off for one side");
+            break;
+        }
+
+        let dice = rng.dice();
+        println!("roll: {}", format_dice(dice));
+        if player_turn {
+            let legal = generate_candidate_moves(&board, dice);
+            if legal.is_empty() {
+                println!("no legal player moves");
+            } else {
+                println!("legal moves:");
+                for mv in &legal {
+                    println!("  {}", format_move_compact(mv));
+                }
+                let Some(chosen) = prompt_player_move(&legal)? else {
+                    println!("bye");
+                    break;
+                };
+                board = Board::from_key(chosen.resulting_position);
+            }
+        } else {
+            let result = search_position(&board, dice, &config)?;
+            println!(
+                "engine: {} equity={:+.3}",
+                format_move_compact(&result.best_move),
+                result.best_equity
+            );
+            board = Board::from_key(result.best_move.resulting_position);
+        }
+        player_turn = !player_turn;
+    }
+    Ok(())
+}
+
+fn prompt_player_move(legal: &[Move]) -> Result<Option<Move>, Box<dyn std::error::Error>> {
+    loop {
+        print!("move> ");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+        if input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit") {
+            return Ok(None);
+        }
+        if let Some(mv) = legal.iter().find(|mv| move_matches_input(mv, input)) {
+            return Ok(Some(mv.clone()));
+        }
+        println!("invalid move for this roll; enter one of the listed moves or quit");
+    }
 }
 
 fn run_bench(
@@ -157,6 +290,108 @@ fn format_dice(dice: (u8, u8)) -> String {
     format!("{}{}", dice.0, dice.1)
 }
 
+fn format_move(mv: &Move) -> String {
+    format!(
+        "#{} {}{} {}",
+        mv.id,
+        mv.dice.0,
+        mv.dice.1,
+        format_move_compact(mv)
+    )
+}
+
+fn format_move_compact(mv: &Move) -> String {
+    let parts: Vec<String> = mv
+        .steps
+        .iter()
+        .flatten()
+        .map(|(from, to)| {
+            if *to == 0 {
+                format!("{from}/off")
+            } else {
+                format!("{from}/{to}")
+            }
+        })
+        .collect();
+    if parts.is_empty() {
+        format!("{}/{}", mv.from, mv.to)
+    } else {
+        parts.join(" ")
+    }
+}
+
+fn format_pv(pv: &[Move]) -> String {
+    pv.iter()
+        .map(format_move_compact)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn move_matches_input(mv: &Move, input: &str) -> bool {
+    let normalized = normalize_move_text(input);
+    normalized == normalize_move_text(&format_move_compact(mv))
+        || normalized == normalize_move_text(&format_move(mv))
+}
+
+fn normalize_move_text(input: &str) -> String {
+    input
+        .replace("->", "/")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
+}
+
+fn render_board(board: &Board) -> String {
+    let raw = raw_board(board);
+    let mut out = String::new();
+    out.push_str("13 14 15 16 17 18       19 20 21 22 23 24\n");
+    out.push_str("+--------------------------+------------------+\n");
+    for row in (0..5).rev() {
+        out.push_str("| ");
+        for &count in &raw[1][13..=18] {
+            out.push_str(&checker_cell(count, 'X', row));
+        }
+        out.push_str(" |  ");
+        out.push_str(&checker_cell(raw[1][24], 'X', row));
+        out.push_str(" | ");
+        for &count in &raw[1][19..=24] {
+            out.push_str(&checker_cell(count, 'X', row));
+        }
+        out.push_str(" |\n");
+    }
+    out.push_str("|                  BAR|                       |\n");
+    for row in (0..5).rev() {
+        out.push_str("| ");
+        for point in (7..=12).rev() {
+            out.push_str(&checker_cell(raw[0][24 - point], 'O', row));
+        }
+        out.push_str(" |  ");
+        out.push_str(&checker_cell(raw[0][24], 'O', row));
+        out.push_str(" | ");
+        for point in (1..=6).rev() {
+            out.push_str(&checker_cell(raw[0][24 - point], 'O', row));
+        }
+        out.push_str(" |\n");
+    }
+    out.push_str("+--------------------------+------------------+\n");
+    out.push_str("12 11 10  9  8  7        6  5  4  3  2  1\n");
+    out
+}
+
+fn checker_cell(count: u32, symbol: char, row: u32) -> String {
+    if count > row {
+        format!("{symbol}  ")
+    } else {
+        ".  ".to_string()
+    }
+}
+
+fn is_game_over_cli(board: &Board) -> bool {
+    let raw = raw_board(board);
+    raw[0][0] >= 15 || raw[1][0] >= 15
+}
+
 struct SplitMix64 {
     state: u64,
 }
@@ -199,5 +434,12 @@ mod tests {
         assert_eq!(parse_dice("31").expect("31"), (3, 1));
         assert_eq!(parse_dice("3-1").expect("3-1"), (3, 1));
         assert!(parse_dice("70").is_err());
+    }
+
+    #[test]
+    fn formats_full_move_steps() {
+        let board = Board::from_position_id("4HPwATDgc/ABMA").expect("valid board");
+        let moves = generate_candidate_moves(&board, (3, 1));
+        assert!(moves.iter().all(|mv| !format_move_compact(mv).is_empty()));
     }
 }
