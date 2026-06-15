@@ -1,0 +1,16 @@
+[workspace]
+members = ["gnubg-sys", "gnubg-search", "gnubg-cli"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/SigmaLabs-Brasil/backgammon"
+rust-version = "1.78"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
