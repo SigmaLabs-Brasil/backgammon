@@ -36,10 +36,10 @@ fn contact_network_zero_input_matches_c_reference() {
 }
 
 #[test]
-fn opening_position_matches_c_reference_smoke_values() {
+fn opening_position_matches_post_sanity_check_smoke_values() {
     let output = evaluate_position_id("4HPwATDgc/ABMA");
 
-    assert_outputs_close(output, [1.0, 0.0, 1.0, 0.0, 0.0], 1e-4);
+    assert_outputs_close(output, [1.0, 0.0, 0.0, 0.0, 0.0], 1e-4);
 }
 
 #[test]

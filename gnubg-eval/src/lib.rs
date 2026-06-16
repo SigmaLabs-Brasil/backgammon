@@ -6,12 +6,14 @@ pub mod crashed;
 pub mod inputs;
 pub mod neuralnet;
 pub mod race;
+pub mod sanity;
 pub mod weights;
 
 use classify::{classify_position, Classification};
 use gnubg_sys::PositionKey;
 use gnubg_types::{board_from_old_key, Board};
 use neuralnet::{NeuralNet, NeuralNetError};
+use sanity::sanity_check;
 use std::error::Error;
 use std::fmt;
 use std::sync::OnceLock;
@@ -113,7 +115,7 @@ pub fn evaluate_position_key(key: &PositionKey) -> Result<EvalOutput, EvalError>
 pub fn evaluate_board(board: &Board) -> Result<EvalOutput, EvalError> {
     validate_board(board)?;
     let evaluator = evaluator()?;
-    let outputs = match classify_position(board) {
+    let mut outputs = match classify_position(board) {
         Classification::Race => evaluator
             .race
             .feed_forward(&race::calculate_race_inputs(board))?,
@@ -124,6 +126,7 @@ pub fn evaluate_board(board: &Board) -> Result<EvalOutput, EvalError> {
             .crashed
             .feed_forward(&crashed::calculate_crashed_inputs(board))?,
     };
+    sanity_check(&mut outputs);
     Ok(EvalOutput::from_outputs(outputs))
 }
 
