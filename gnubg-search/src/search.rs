@@ -2,15 +2,18 @@ use crate::transposition::{zobrist_hash, TTFlag, TranspositionTable};
 use crate::{
     best_move, evaluate_key_with_thread_cache, generate_candidate_moves, Board, Move, SearchError,
 };
+use gnubg_eval::cubeful::{cubeful_equity, CubeOwner, CubeState};
+use gnubg_eval::met::mwc_after;
 use gnubg_types::Dice;
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SearchConfig {
     pub max_depth: u8,
     pub time_limit_ms: u64,
     pub tt_size: usize,
     pub randomize: bool,
+    pub cube_state: Option<CubeState>,
 }
 
 impl Default for SearchConfig {
@@ -20,6 +23,7 @@ impl Default for SearchConfig {
             time_limit_ms: 0,
             tt_size: 1 << 20,
             randomize: false,
+            cube_state: None,
         }
     }
 }
@@ -31,6 +35,18 @@ pub struct SearchStats {
     pub tt_lookups: u64,
     pub eval_calls: u64,
     pub time_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CubeAction { NoDouble, DoubleTake, DoubleDrop }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CubeDecision {
+    pub action: CubeAction,
+    pub no_double_equity: f32,
+    pub double_take_equity: f32,
+    pub double_drop_equity: f32,
+    pub gain: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -48,6 +64,7 @@ pub struct SearchResult {
     pub best_equity: f32,
     pub stats: SearchStats,
     pub config: SearchConfig,
+    pub cube_decision: Option<CubeDecision>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -57,6 +74,7 @@ pub struct AnalyzeRoll {
     pub equity: f32,
     pub pv: Vec<Move>,
     pub depth_searched: u8,
+    pub cube_decision: Option<CubeDecision>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,6 +154,7 @@ pub fn search_position(
             best_equity: best.equity,
             stats: ctx.finish_stats(),
             config: normalized,
+            cube_decision: None,
         };
         if ctx.stopped {
             break;
@@ -143,6 +162,14 @@ pub fn search_position(
     }
 
     best_completed.stats = ctx.finish_stats();
+
+    // Compute cube decision if we have a centered cube
+    if let Some(cube) = &config.cube_state {
+        if cube.owner == CubeOwner::Center {
+            best_completed.cube_decision = Some(compute_cube_decision(board, cube)?);
+        }
+    }
+
     Ok(best_completed)
 }
 
@@ -161,6 +188,19 @@ pub fn analyze_position(
         totals.tt_lookups += result.stats.tt_lookups;
         totals.eval_calls += result.stats.eval_calls;
         totals.time_ms += result.stats.time_ms;
+
+        // Per-roll cube decision: evaluate resulting position with the cube state
+        let cube_decision = if let Some(cube) = &normalized.cube_state {
+            if cube.owner == CubeOwner::Center {
+                let resulting_board = Board::from_key(result.best_move.resulting_position);
+                Some(compute_cube_decision(&resulting_board, cube)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         rolls.push(AnalyzeRoll {
             dice,
             best_move: result.best_move,
@@ -174,6 +214,7 @@ pub fn analyze_position(
                 .evaluations
                 .first()
                 .map_or(normalized.max_depth, |evaluation| evaluation.depth_searched),
+            cube_decision,
         });
     }
 
@@ -194,12 +235,28 @@ fn depth_zero_search(
         return Err(SearchError::EmptyMoveList);
     }
     let (best, best_eval) = best_move(board, dice, 0)?;
+    let best_equity = match &config.cube_state {
+        Some(cube) => {
+            let outputs = [best_eval.win, best_eval.win_gammon, best_eval.win_backgammon,
+                           best_eval.lose_gammon, best_eval.lose_backgammon];
+            cubeful_equity(&outputs, cube)
+        }
+        None => best_eval.equity,
+    };
     let mut evaluations = Vec::with_capacity(moves.len());
     for mv in moves {
         let eval = evaluate_key_with_thread_cache(mv.resulting_position, 0)?;
+        let equity = match &config.cube_state {
+            Some(cube) => {
+                let outputs = [eval.win, eval.win_gammon, eval.win_backgammon,
+                               eval.lose_gammon, eval.lose_backgammon];
+                cubeful_equity(&outputs, cube)
+            }
+            None => eval.equity,
+        };
         evaluations.push(MoveEvaluation {
             mv: mv.clone(),
-            equity: eval.equity,
+            equity,
             depth_searched: 0,
             pv: vec![mv],
         });
@@ -212,7 +269,7 @@ fn depth_zero_search(
     Ok(SearchResult {
         evaluations,
         best_move: best,
-        best_equity: best_eval.equity,
+        best_equity,
         stats: SearchStats {
             nodes_searched: 0,
             tt_hits: 0,
@@ -221,6 +278,7 @@ fn depth_zero_search(
             time_ms: 0,
         },
         config,
+        cube_decision: None,
     })
 }
 
@@ -364,11 +422,20 @@ fn alpha_beta(
 
 fn leaf_eval(key: gnubg_sys::PositionKey, ctx: &mut SearchContext) -> Result<f32, SearchError> {
     ctx.stats.eval_calls += 1;
-    let mut equity = evaluate_key_with_thread_cache(key, ctx.config.max_depth)?.equity;
+    let eval = evaluate_key_with_thread_cache(key, ctx.config.max_depth)?;
+    let score = match &ctx.config.cube_state {
+        Some(cube) => {
+            let outputs = [eval.win, eval.win_gammon, eval.win_backgammon,
+                           eval.lose_gammon, eval.lose_backgammon];
+            cubeful_equity(&outputs, cube)
+        }
+        None => eval.equity,
+    };
     if ctx.config.randomize {
-        equity += deterministic_jitter(key);
+        Ok(score + deterministic_jitter(key))
+    } else {
+        Ok(score)
     }
-    Ok(equity)
 }
 
 fn order_moves(
@@ -421,6 +488,55 @@ fn normalize_config(mut config: SearchConfig) -> SearchConfig {
 fn deterministic_jitter(key: gnubg_sys::PositionKey) -> f32 {
     let noise = (zobrist_hash(&key) & 0xffff) as f32 / 65_535.0;
     (noise - 0.5) * 0.002
+}
+
+pub fn compute_cube_decision(
+    board: &Board,
+    cube: &CubeState,
+) -> Result<CubeDecision, SearchError> {
+    let eval = evaluate_key_with_thread_cache(board.key(), 0)?;
+    let outputs = [eval.win, eval.win_gammon, eval.win_backgammon,
+                   eval.lose_gammon, eval.lose_backgammon];
+
+    // No double: current cube state
+    let no_double_equity = cubeful_equity(&outputs, cube);
+
+    // Double/Take: opponent owns cube at double value
+    let double_take_cube = CubeState {
+        value: cube.value * 2,
+        owner: CubeOwner::Opponent,
+        ..*cube
+    };
+    let double_take_equity = cubeful_equity(&outputs, &double_take_cube);
+
+    // Double/Drop: player wins cube.value points
+    let double_drop_equity = match &cube.match_state {
+        Some(ms) => mwc_after(ms, cube.value),
+        None => cube.value as f32,
+    };
+
+    let double_equity = double_take_equity.min(double_drop_equity);
+    let is_double = double_equity > no_double_equity;
+
+    let action = if is_double {
+        if (double_equity - double_take_equity).abs() < 1e-6 {
+            CubeAction::DoubleTake
+        } else {
+            CubeAction::DoubleDrop
+        }
+    } else {
+        CubeAction::NoDouble
+    };
+
+    let gain = double_equity - no_double_equity;
+
+    Ok(CubeDecision {
+        action,
+        no_double_equity,
+        double_take_equity,
+        double_drop_equity,
+        gain,
+    })
 }
 
 #[cfg(test)]
