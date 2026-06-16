@@ -15,5 +15,6 @@ clap = { version = "4.5", features = ["derive"] }
 gnubg-eval = { path = "../gnubg-eval" }
 gnubg-search = { path = "../gnubg-search" }
 gnubg-sys = { path = "../gnubg-sys" }
+gnubg-types = { path = "../gnubg-types" }
 mimalloc = "0.1"
 rayon = "1.10"
