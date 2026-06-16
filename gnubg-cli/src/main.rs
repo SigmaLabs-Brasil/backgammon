@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use gnubg_eval::cubeful::{CubeOwner, CubeState};
-use gnubg_eval::met::{mwc, MatchState};
+use gnubg_eval::met::{mwc, mwc_after, MatchState};
 use gnubg_search::{
     analyze_position, best_move, evaluate_board, generate_candidate_moves, parallel_eval_root,
     raw_board, search_position, thread_cache_stats, Board, EvalResult, Move, SearchConfig,
@@ -55,6 +55,18 @@ enum Command {
         depth: u8,
         #[arg(long)]
         time_limit: Option<u64>,
+    },
+    /// Evaluate cube doubling decision for a position.
+    AnalyzeCube {
+        position_id: String,
+        #[arg(long = "match", value_parser = parse_match_score)]
+        match_score: Option<(i32, i32)>,
+        #[arg(long)]
+        crawford: bool,
+        #[arg(long)]
+        post_crawford: bool,
+        #[arg(long, default_value_t = 0)]
+        depth: u8,
     },
     /// Play an interactive money-game session against the engine.
     Play {
@@ -143,6 +155,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             depth,
             time_limit,
         } => run_analyze(&position_id, depth, time_limit)?,
+        Command::AnalyzeCube {
+            position_id,
+            match_score,
+            crawford,
+            post_crawford,
+            depth,
+        } => run_analyze_cube(&position_id, match_score, crawford, post_crawford, depth)?,
         Command::Play { color, depth } => run_play(color.as_deref().unwrap_or("player"), depth)?,
         Command::Bench {
             positions,
@@ -187,6 +206,137 @@ fn run_analyze(
         result.stats.tt_lookups,
         result.stats.time_ms
     );
+    Ok(())
+}
+
+fn run_analyze_cube(
+    position_id: &str,
+    match_score: Option<(i32, i32)>,
+    crawford: bool,
+    post_crawford: bool,
+    depth: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if match_score.is_none() && (crawford || post_crawford) {
+        return Err("--crawford/--post-crawford require --match".into());
+    }
+
+    let board = Board::from_position_id(position_id)?;
+    let eval = evaluate_board(&board, depth)?;
+    let match_state = match_score.map(|(player_away, opponent_away)| {
+        MatchState::new(player_away, opponent_away, crawford, post_crawford)
+    });
+
+    let outputs = [
+        eval.win,
+        eval.win_gammon,
+        eval.win_backgammon,
+        eval.lose_gammon,
+        eval.lose_backgammon,
+    ];
+
+    println!("position_id: {position_id}");
+    if let Some(ref ms) = match_state {
+        print_match_state(ms);
+    }
+    print_eval(&eval, true, match_state.as_ref());
+    println!("cache_hit: {}", eval.cache_hit);
+    println!("simd_supported: {}", gnubg_sys::simd_supported());
+    println!("weights_bytes: {}", gnubg_sys::embedded_weights_len());
+
+    // Crawford handling — cube frozen, always NO DOUBLE
+    if let Some(ref ms) = match_state {
+        if ms.crawford {
+            println!();
+            println!("=== Cube Analysis (match play) ===");
+            println!("(Crawford — cube frozen)");
+            println!();
+            println!("Decision: NO DOUBLE");
+            return Ok(());
+        }
+    }
+
+    // --- Cube scenarios ---
+    // No double: center cube at value 1
+    let no_double_cube = CubeState {
+        value: 1,
+        owner: CubeOwner::Center,
+        efficiency: 0.68,
+        match_state,
+    };
+    let no_double_value = gnubg_eval::cubeful::cubeful_equity(&outputs, &no_double_cube);
+
+    // Double/Take: opponent owns cube at value 2
+    let double_take_cube = CubeState {
+        value: 2,
+        owner: CubeOwner::Opponent,
+        efficiency: 0.68,
+        match_state: match_state.clone(),
+    };
+    let take_value = gnubg_eval::cubeful::cubeful_equity(&outputs, &double_take_cube);
+
+    // Double/Drop: immediate win of 1 point
+    let drop_value = match match_state.clone() {
+        Some(ref ms) => mwc_after(ms, 1),
+        None => 1.0,
+    };
+    let drop_note = match match_state.clone() {
+        Some(ref ms) => {
+            let new_player_away = 0.max(ms.player_away - 1);
+            format!(
+                "   (win 1 point → {}-away/{}-away)",
+                new_player_away, ms.opponent_away
+            )
+        }
+        None => String::new(),
+    };
+
+    let double_value = take_value.min(drop_value);
+    let is_double = double_value > no_double_value;
+
+    println!();
+    if match_state.is_some() {
+        println!("=== Cube Analysis (match play) ===");
+        println!(
+            "No double:    MWC = {:.2}%",
+            no_double_value * 100.0
+        );
+        println!(
+            "Double/Take:  MWC = {:.2}%",
+            take_value * 100.0
+        );
+        println!(
+            "Double/Drop:  MWC = {:.2}%{}",
+            drop_value * 100.0,
+            drop_note
+        );
+        println!();
+        if is_double {
+            let opponent_choice = if (double_value - take_value).abs() < 1e-6 {
+                "take"
+            } else {
+                "drop"
+            };
+            let gain = (double_value - no_double_value) * 100.0;
+            println!(
+                "Decision: DOUBLE ({}) — gains {:.2}% MWC",
+                opponent_choice, gain
+            );
+        } else {
+            println!("Decision: NO DOUBLE");
+        }
+    } else {
+        println!("=== Cube Analysis (money game) ===");
+        println!("No double:    {:+.3}", no_double_value);
+        println!("Double/Take:  {:+.3}", take_value);
+        println!("Double/Drop:  {:+.3}", drop_value);
+        println!();
+        if is_double {
+            println!("Decision: DOUBLE");
+        } else {
+            println!("Decision: NO DOUBLE");
+        }
+    }
+
     Ok(())
 }
 
