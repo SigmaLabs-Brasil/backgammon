@@ -5,6 +5,7 @@ pub mod contact;
 pub mod crashed;
 pub mod cubeful;
 pub mod inputs;
+pub mod met;
 pub mod neuralnet;
 pub mod race;
 pub mod sanity;

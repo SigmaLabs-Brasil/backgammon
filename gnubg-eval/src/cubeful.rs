@@ -1,3 +1,5 @@
+use crate::met::{match_equity_swing, mwc, MatchState};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CubeOwner {
     Player,
@@ -10,6 +12,7 @@ pub struct CubeState {
     pub value: i32,
     pub owner: CubeOwner,
     pub efficiency: f32,
+    pub match_state: Option<MatchState>,
 }
 
 impl Default for CubeState {
@@ -18,6 +21,7 @@ impl Default for CubeState {
             value: 1,
             owner: CubeOwner::Center,
             efficiency: 1.0,
+            match_state: None,
         }
     }
 }
@@ -41,10 +45,18 @@ pub fn cubeful_equity(outputs: &[f32; 5], cube: &CubeState) -> f32 {
     let live = live_cube_equity(outputs);
     let cubeful = live - cube.efficiency * (live - dead);
 
-    match cube.owner {
+    let point_equity = match cube.owner {
         CubeOwner::Player => cubeful * cube.value as f32,
         CubeOwner::Opponent => -(-cubeful * cube.value as f32),
         CubeOwner::Center => cubeful,
+    };
+
+    match &cube.match_state {
+        None => point_equity,
+        Some(match_state) => {
+            let current = mwc(match_state);
+            current + match_equity_swing(match_state, point_equity)
+        }
     }
 }
 
@@ -96,6 +108,7 @@ mod tests {
             value: 1,
             owner: CubeOwner::Center,
             efficiency: 1.0,
+            match_state: None,
         };
 
         approx_eq(cubeful_equity(&outputs, &cube), cubeless_equity(&outputs));
