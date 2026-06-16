@@ -1,3 +1,5 @@
+#![allow(clippy::manual_contains)]
+
 //! Parallel root evaluation, alpha-beta search, and lock-free per-thread eval cache.
 
 pub mod search;
@@ -364,6 +366,7 @@ mod tests {
                 value: 2,
                 owner: gnubg_eval::cubeful::CubeOwner::Player,
                 efficiency: 1.0,
+                match_state: None,
             });
 
         assert!((eval.equity - 0.13).abs() < 1.0e-6);

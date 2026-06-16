@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use gnubg_eval::cubeful::{CubeOwner, CubeState};
+use gnubg_eval::met::{mwc, MatchState};
 use gnubg_search::{
     analyze_position, best_move, evaluate_board, generate_candidate_moves, parallel_eval_root,
     raw_board, search_position, thread_cache_stats, Board, EvalResult, Move, SearchConfig,
@@ -33,6 +34,12 @@ enum Command {
         depth: u8,
         #[arg(long, value_parser = parse_cube_value)]
         cube: Option<i32>,
+        #[arg(long = "match", value_parser = parse_match_score)]
+        match_score: Option<(i32, i32)>,
+        #[arg(long)]
+        crawford: bool,
+        #[arg(long)]
+        post_crawford: bool,
     },
     /// Generate candidate root moves for a roll and print the highest equity move.
     BestMove {
@@ -75,14 +82,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             roll,
             depth,
             cube,
+            match_score,
+            crawford,
+            post_crawford,
         } => {
             let board = Board::from_position_id(&position_id)?;
             let mut eval = evaluate_board(&board, depth)?;
-            let show_cubeful = if let Some(value) = cube {
+            if match_score.is_none() && (crawford || post_crawford) {
+                return Err("--crawford/--post-crawford require --match".into());
+            }
+            let match_state = match_score.map(|(player_away, opponent_away)| {
+                MatchState::new(player_away, opponent_away, crawford, post_crawford)
+            });
+            let show_cubeful = if cube.is_some() || match_state.is_some() {
                 let cube = CubeState {
-                    value,
+                    value: cube.unwrap_or(1),
                     owner: CubeOwner::Center,
                     efficiency: 0.68,
+                    match_state,
                 };
                 eval = eval.with_cubeful(&cube);
                 true
@@ -93,7 +110,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(roll) = roll {
                 println!("roll: {}", format_dice(parse_dice(&roll)?));
             }
-            print_eval(&eval, show_cubeful);
+            if let Some(match_state) = match_state {
+                print_match_state(&match_state);
+            }
+            print_eval(&eval, show_cubeful, match_state.as_ref());
             println!("cache_hit: {}", eval.cache_hit);
             println!("simd_supported: {}", gnubg_sys::simd_supported());
             println!("weights_bytes: {}", gnubg_sys::embedded_weights_len());
@@ -116,7 +136,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let (mv, eval) = best_move(&board, dice, depth)?;
             println!("best_move: {}", format_move(&mv));
-            print_eval(&eval, false);
+            print_eval(&eval, false, None);
         }
         Command::Analyze {
             position_id,
@@ -277,17 +297,58 @@ fn run_bench(
     Ok(())
 }
 
-fn print_eval(eval: &EvalResult, show_cubeful: bool) {
+fn print_eval(eval: &EvalResult, show_cubeful: bool, match_state: Option<&MatchState>) {
     println!("win: {:.2}%", eval.win * 100.0);
     println!("win_gammon: {:.2}%", eval.win_gammon * 100.0);
     println!("win_backgammon: {:.2}%", eval.win_backgammon * 100.0);
     println!("lose_gammon: {:.2}%", eval.lose_gammon * 100.0);
     println!("lose_backgammon: {:.2}%", eval.lose_backgammon * 100.0);
     println!("equity: {:.6}", eval.equity);
-    if show_cubeful {
+    if let Some(match_state) = match_state {
+        let current_mwc = mwc(match_state);
+        println!("mwc: {:.2}%", current_mwc * 100.0);
+        println!(
+            "swing: {:+.2}%",
+            (eval.cubeful_equity - current_mwc) * 100.0
+        );
+    } else if show_cubeful {
         println!("cubeful: {:.6}", eval.cubeful_equity);
     }
     println!("depth: {}", eval.depth);
+}
+
+fn print_match_state(state: &MatchState) {
+    let suffix = if state.crawford {
+        " (Crawford)"
+    } else if state.post_crawford {
+        " (post-Crawford)"
+    } else {
+        ""
+    };
+    println!(
+        "match: {}-away / {}-away{}",
+        state.player_away, state.opponent_away, suffix
+    );
+}
+
+fn parse_match_score(input: &str) -> Result<(i32, i32), String> {
+    let Some((player, opponent)) = input.split_once(':') else {
+        return Err(format!(
+            "match must be PLAYER_AWAY:OPPONENT_AWAY, got '{input}'"
+        ));
+    };
+    let player_away: i32 = player
+        .parse()
+        .map_err(|_| format!("match must be PLAYER_AWAY:OPPONENT_AWAY, got '{input}'"))?;
+    let opponent_away: i32 = opponent
+        .parse()
+        .map_err(|_| format!("match must be PLAYER_AWAY:OPPONENT_AWAY, got '{input}'"))?;
+    if !(1..=25).contains(&player_away) || !(1..=25).contains(&opponent_away) {
+        return Err(format!(
+            "match away scores must be in 1..=25, got '{input}'"
+        ));
+    }
+    Ok((player_away, opponent_away))
 }
 
 fn parse_cube_value(input: &str) -> Result<i32, String> {
@@ -464,6 +525,15 @@ mod tests {
         assert_eq!(parse_dice("31").expect("31"), (3, 1));
         assert_eq!(parse_dice("3-1").expect("3-1"), (3, 1));
         assert!(parse_dice("70").is_err());
+    }
+
+    #[test]
+    fn parses_match_score() {
+        assert_eq!(parse_match_score("5:3").expect("5:3"), (5, 3));
+        assert_eq!(parse_match_score("1:25").expect("1:25"), (1, 25));
+        assert!(parse_match_score("5-3").is_err());
+        assert!(parse_match_score("0:3").is_err());
+        assert!(parse_match_score("26:3").is_err());
     }
 
     #[test]

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::int_plus_one,
+    clippy::manual_clamp,
+    clippy::needless_range_loop
+)]
+
 //! Pure Rust GNU Backgammon neural-network evaluation.
 
 pub mod classify;
@@ -5,6 +11,7 @@ pub mod contact;
 pub mod crashed;
 pub mod cubeful;
 pub mod inputs;
+pub mod met;
 pub mod neuralnet;
 pub mod race;
 pub mod sanity;
