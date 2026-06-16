@@ -16,6 +16,14 @@
 //! - A destination of 0 always means bear-off (checker enters the bear-off tray)
 
 #![forbid(unsafe_code)]
+#![allow(
+    clippy::len_zero,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    unused_imports,
+    unused_mut,
+    unused_variables
+)]
 
 use gnubg_types::{old_position_key, Move, MoveList, PositionKey};
 

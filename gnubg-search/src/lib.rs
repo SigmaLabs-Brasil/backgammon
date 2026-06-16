@@ -1,3 +1,5 @@
+#![allow(clippy::manual_contains)]
+
 //! Parallel root evaluation, alpha-beta search, and lock-free per-thread eval cache.
 
 pub mod search;

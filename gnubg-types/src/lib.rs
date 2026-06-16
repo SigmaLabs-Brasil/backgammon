@@ -1,3 +1,6 @@
+#![allow(clippy::needless_range_loop, clippy::unnecessary_cast)]
+#![forbid(unsafe_code)]
+
 //! Pure Rust core data types for GNU Backgammon.
 //!
 //! Ported from the C headers in `lib/gnubg-types.h`, `positionid.h`, `matchid.h`,
@@ -7,8 +10,6 @@
 //!
 //! This crate has **no runtime dependencies** by default. The `serialize` feature
 //! enables serde `Serialize`/`Deserialize` on all public types.
-
-#![forbid(unsafe_code)]
 
 use core::fmt;
 
