@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
+gnubg-eval = { path = "../gnubg-eval" }
 gnubg-search = { path = "../gnubg-search" }
 gnubg-sys = { path = "../gnubg-sys" }
 mimalloc = "0.1"

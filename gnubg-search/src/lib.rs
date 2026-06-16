@@ -6,7 +6,7 @@ pub mod transposition;
 pub use search::*;
 pub use transposition::*;
 
-use gnubg_sys::{decode_position_id, evaluate_position_key, GnuBgError, PositionKey, RawEval};
+use gnubg_sys::{decode_position_id, GnuBgError, PositionKey, RawEval};
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fmt;
@@ -184,6 +184,7 @@ impl EvalCache {
 #[derive(Debug)]
 pub enum SearchError {
     Ffi(GnuBgError),
+    Eval(gnubg_eval::EvalError),
     EmptyMoveList,
 }
 
@@ -191,6 +192,7 @@ impl fmt::Display for SearchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Ffi(err) => write!(f, "{err}"),
+            Self::Eval(err) => write!(f, "{err}"),
             Self::EmptyMoveList => f.write_str("no candidate moves to evaluate"),
         }
     }
@@ -201,6 +203,12 @@ impl std::error::Error for SearchError {}
 impl From<GnuBgError> for SearchError {
     fn from(value: GnuBgError) -> Self {
         Self::Ffi(value)
+    }
+}
+
+impl From<gnubg_eval::EvalError> for SearchError {
+    fn from(value: gnubg_eval::EvalError) -> Self {
+        Self::Eval(value)
     }
 }
 
@@ -217,7 +225,10 @@ pub fn evaluate_key_with_thread_cache(
         if let Some(hit) = cache.lookup(&key, depth) {
             return Ok(hit);
         }
-        let raw = evaluate_position_key(&key)?;
+        let output = gnubg_eval::evaluate_position_key(&key)?;
+        let raw = RawEval {
+            outputs: output.outputs(),
+        };
         let eval = EvalResult::from_raw(raw, depth, false);
         cache.insert(key, depth, eval);
         Ok(eval)
