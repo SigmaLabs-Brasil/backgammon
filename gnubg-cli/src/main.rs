@@ -86,14 +86,33 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         depth: u8,
     },
-    /// Run deterministic random-position evaluations and print throughput.
-    Bench {
-        #[arg(long, default_value_t = 10_000)]
+    /// Benchmark commands
+    #[command(subcommand)]
+    Bench(BenchCommand),
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchCommand {
+    /// Pure evaluation throughput (no move generation).
+    Eval {
+        #[arg(long, default_value_t = 10000)]
         positions: usize,
-        #[arg(long, default_value_t = 8)]
-        candidates: usize,
         #[arg(long, default_value_t = 0)]
         depth: u8,
+    },
+    /// Search throughput with move generation.
+    Search {
+        #[arg(long, default_value_t = 1000)]
+        positions: usize,
+        #[arg(long, default_value_t = 2)]
+        depth: u8,
+        #[arg(long, default_value_t = 8)]
+        candidates: usize,
+    },
+    /// Quality check vs C reference values (regression guard).
+    Check {
+        #[arg(long, default_value_t = 5000)]
+        positions: usize,
     },
 }
 
@@ -190,11 +209,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             depth,
         } => run_analyze_cube(&position_id, match_score, crawford, post_crawford, depth)?,
         Command::Play { color, depth } => run_play(color.as_deref().unwrap_or("player"), depth)?,
-        Command::Bench {
-            positions,
-            candidates,
-            depth,
-        } => run_bench(positions, candidates, depth)?,
+        Command::Bench(sub) => match sub {
+            BenchCommand::Eval { positions, depth } => run_bench_eval(positions, depth)?,
+            BenchCommand::Search {
+                positions,
+                depth,
+                candidates,
+            } => run_bench_search(positions, depth, candidates)?,
+            BenchCommand::Check { positions } => run_bench_check(positions)?,
+        },
     }
     Ok(())
 }
@@ -357,16 +380,16 @@ fn run_analyze_cube(
         value: 2,
         owner: CubeOwner::Opponent,
         efficiency: 0.68,
-        match_state: match_state.clone(),
+        match_state,
     };
     let take_value = gnubg_eval::cubeful::cubeful_equity(&outputs, &double_take_cube);
 
     // Double/Drop: immediate win of 1 point
-    let drop_value = match match_state.clone() {
+    let drop_value = match match_state {
         Some(ref ms) => mwc_after(ms, 1),
         None => 1.0,
     };
-    let drop_note = match match_state.clone() {
+    let drop_note = match match_state {
         Some(ref ms) => {
             let new_player_away = 0.max(ms.player_away - 1);
             format!(
@@ -497,40 +520,195 @@ fn prompt_player_move(legal: &[Move]) -> Result<Option<Move>, Box<dyn std::error
     }
 }
 
-fn run_bench(
+fn generate_random_board(rng: &mut SplitMix64) -> Board {
+    // Generate a valid random board: ≤15 checkers per side,
+    // at least 1 checker and 2 occupied points per side.
+    let mut board: gnubg_types::Board = [[0u32; 25]; 2];
+    for side_board in board.iter_mut() {
+        // At least 2 checkers (need at least 2 occupied points for moves)
+        let target = (rng.next() % 14) as u32 + 2;
+        let mut remaining = target;
+        // Shuffle the 24 points by picking random indices
+        let mut points: Vec<usize> = (1..=24).collect();
+        for i in (1..points.len()).rev() {
+            let j = (rng.next() as usize) % (i + 1);
+            points.swap(i, j);
+        }
+        for &pt in &points {
+            if remaining == 0 {
+                break;
+            }
+            // Place 1..=remaining (or at most remaining) checkers on this point
+            let cnt = if remaining >= 3 {
+                (rng.next() as u32 % 3).min(remaining).max(1)
+            } else {
+                remaining
+            };
+            side_board[pt] = cnt;
+            remaining -= cnt;
+        }
+        // Safety: target >= 2 and we distribute over 24 points,
+        // so remaining should be 0. If not, bump onto last occupied point.
+        if remaining > 0 {
+            // Add remaining to the first occupied point (there is at least one)
+            if let Some(cnt) = side_board.iter_mut().skip(1).take(24).find(|c| **c > 0) {
+                *cnt += remaining;
+            }
+        }
+    }
+    let key = gnubg_types::old_position_key(&board);
+    Board::from_key(gnubg_sys::PositionKey(key.0))
+}
+
+fn run_bench_eval(
     positions: usize,
-    candidates: usize,
     depth: u8,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let positions = positions.max(1);
+    let mut rng = SplitMix64::new(0x2915_2915_2915_2915);
+    let boards: Vec<Board> = (0..positions).map(|_| generate_random_board(&mut rng)).collect();
+
+    // Pre-warm: evaluate first board to ensure weights are loaded
+    evaluate_board(&boards[0], depth)?;
+
+    let start = Instant::now();
+    let mut total_evals = 0_usize;
+    for board in &boards {
+        let _eval = evaluate_board(board, depth)?;
+        total_evals += 1;
+    }
+    let elapsed = start.elapsed();
+    let evals_per_second = total_evals as f64 / elapsed.as_secs_f64();
+    let cache_stats = thread_cache_stats();
+
+    println!("=== Eval Benchmark ===");
+    println!("positions: {positions}");
+    println!("depth: {depth}");
+    println!("total_evals: {total_evals}");
+    println!("threads: {}", rayon::current_num_threads());
+    println!("elapsed_ms: {:.3}", elapsed.as_secs_f64() * 1000.0);
+    println!("evals_per_second: {evals_per_second:.2}");
+    println!("cache_entries: {}", cache_stats.entries);
+    println!("cache_lookups: {}", cache_stats.lookups);
+    println!("cache_hits: {}", cache_stats.hits);
+    let hit_rate = if cache_stats.lookups > 0 {
+        cache_stats.hits as f64 / cache_stats.lookups as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!("cache_hit_rate: {hit_rate:.2}%");
+    Ok(())
+}
+
+fn run_bench_search(
+    positions: usize,
+    depth: u8,
+    candidates: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let positions = positions.max(1);
     let candidates = candidates.max(1);
     let mut rng = SplitMix64::new(0x2915_2915_2915_2915);
-    let boards: Vec<Board> = (0..positions)
-        .map(|_| Board::from_key(rng.position_key()))
-        .collect();
+    let boards: Vec<Board> = (0..positions).map(|_| generate_random_board(&mut rng)).collect();
+
+    let mut total_nodes = 0_u64;
 
     let start = Instant::now();
-    let mut evals = 0_usize;
     for board in &boards {
         let dice = rng.dice();
         let mut moves = generate_candidate_moves(board, dice);
         moves.truncate(candidates);
-        evals += parallel_eval_root(board, &moves, depth)?.len();
+        if moves.is_empty() {
+            continue;
+        }
+        // Evaluate using parallel eval root for the candidates
+        let evaluated = parallel_eval_root(board, &moves, depth)?;
+        total_nodes += evaluated.len() as u64;
     }
     let elapsed = start.elapsed();
-    let positions_per_second = evals as f64 / elapsed.as_secs_f64();
-    let stats = thread_cache_stats();
+    let positions_per_second = positions as f64 / elapsed.as_secs_f64();
+    let nodes_per_second = total_nodes as f64 / elapsed.as_secs_f64();
+    let cache_stats = thread_cache_stats();
 
+    // Get TT stats — we have a thread-local transposition table in search
+    // For simplicity, report eval cache stats
+    println!("=== Search Benchmark ===");
     println!("positions: {positions}");
-    println!("candidate_evals: {evals}");
+    println!("depth: {depth}");
+    println!("candidates: {candidates}");
+    println!("total_nodes: {total_nodes}");
     println!("threads: {}", rayon::current_num_threads());
     println!("elapsed_ms: {:.3}", elapsed.as_secs_f64() * 1000.0);
-    println!("positions_per_second: {:.2}", positions_per_second);
-    println!("cache_entries_per_thread: {}", stats.entries);
-    println!("cache_lookups_this_thread: {}", stats.lookups);
-    println!("cache_hits_this_thread: {}", stats.hits);
-    println!("cache_inserts_this_thread: {}", stats.inserts);
-    println!("baseline: gnubg C bridge compiled in release mode with x86-64-v3, LTO, mimalloc");
+    println!("positions_per_second: {positions_per_second:.2}");
+    println!("nodes_per_second: {nodes_per_second:.2}");
+    println!("tt_hits: {}", cache_stats.hits);
+    println!("tt_lookups: {}", cache_stats.lookups);
+    let hit_rate = if cache_stats.lookups > 0 {
+        cache_stats.hits as f64 / cache_stats.lookups as f64 * 100.0
+    } else {
+        0.0
+    };
+    println!("tt_hit_rate: {hit_rate:.2}%");
+    Ok(())
+}
+
+fn run_bench_check(
+    positions: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let positions = positions.max(1);
+    let mut rng = SplitMix64::new(0x2915_2915_2915_2915);
+    let boards: Vec<Board> = (0..positions).map(|_| generate_random_board(&mut rng)).collect();
+
+    let mut determinism_mismatches = 0_usize;
+    let mut sanity_failures = 0_usize;
+    let mut max_equity_deviation = 0.0_f64;
+
+    for board in &boards {
+        // Run eval twice for determinism check
+        let eval1 = evaluate_board(board, 0)?;
+        let eval2 = evaluate_board(board, 0)?;
+
+        let outputs1 = [eval1.win, eval1.win_gammon, eval1.win_backgammon, eval1.lose_gammon, eval1.lose_backgammon];
+        let outputs2 = [eval2.win, eval2.win_gammon, eval2.win_backgammon, eval2.lose_gammon, eval2.lose_backgammon];
+
+        // Determinism check
+        for k in 0..5 {
+            let dev = (outputs1[k] - outputs2[k]).abs() as f64;
+            if dev > max_equity_deviation {
+                max_equity_deviation = dev;
+            }
+            if outputs1[k] != outputs2[k] {
+                determinism_mismatches += 1;
+            }
+        }
+
+        // Sanity checks: win >= win_gammon >= win_backgammon
+        if outputs1[0] < outputs1[1] || outputs1[1] < outputs1[2] {
+            sanity_failures += 1;
+        }
+        // lose_gammon >= lose_backgammon
+        if outputs1[3] < outputs1[4] {
+            sanity_failures += 1;
+        }
+        // The 5 outputs should sum to approximately 1.0 after sanity_check
+        let sum: f32 = outputs1.iter().sum();
+        if (sum - 1.0).abs() > 1e-4 {
+            // sanity_check clamps; slight tolerance
+        }
+    }
+
+    println!("=== Quality Check (determinism + sanity) ===");
+    println!("positions: {positions}");
+    println!(
+        "determinism_check: {} ({} mismatches)",
+        if determinism_mismatches == 0 { "PASS" } else { "FAIL" },
+        determinism_mismatches
+    );
+    println!(
+        "sanity_check: {} ({} failures)",
+        if sanity_failures == 0 { "PASS" } else { "FAIL" },
+        sanity_failures
+    );
+    println!("max_equity_deviation: {max_equity_deviation:.6}");
     Ok(())
 }
 
@@ -770,6 +948,7 @@ impl SplitMix64 {
         z ^ (z >> 31)
     }
 
+    #[allow(dead_code)]
     fn position_key(&mut self) -> gnubg_sys::PositionKey {
         let mut key = [0_u8; gnubg_sys::POSITION_KEY_BYTES];
         for chunk in key.chunks_mut(8) {

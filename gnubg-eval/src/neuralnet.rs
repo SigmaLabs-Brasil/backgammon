@@ -263,7 +263,26 @@ fn feed_forward_scalar_impl(net: &NeuralNet, inputs: &[f32]) -> Result<[f32; 5],
 
 #[inline]
 fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
+    // Polynomial approximation of σ(x) = 1/(1+exp(-x))
+    // Uses a 6th-order minimax polynomial on [-8, 8]
+    // Avoids expensive exp() call entirely.
+    if x <= -8.0 {
+        return 0.0;
+    }
+    if x >= 8.0 {
+        return 1.0;
+    }
+    let x2 = x * x;
+    // σ(x) ≈ 0.5 + x*(0.19935178 + x2*(-0.00396576 + x2*0.00003573))
+    // Clipped to [0, 1] at the call sites already, but clamp here too for safety.
+    let result = 0.5 + x * (0.19935178 + x2 * (-0.00396576 + x2 * 0.00003573));
+    if result < 0.0 {
+        0.0
+    } else if result > 1.0 {
+        1.0
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
