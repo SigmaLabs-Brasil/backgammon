@@ -7,8 +7,12 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-gnubg-eval = { path = "../gnubg-eval" }
+gnubg-eval = { path = "../gnubg-eval", default-features = false }
 gnubg-sys = { path = "../gnubg-sys" }
 gnubg-types = { path = "../gnubg-types" }
 gnubg-moves = { path = "../gnubg-moves" }
-rayon = "1.10"
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = ["rayon", "gnubg-eval/rayon"]
+wasm = ["gnubg-eval/wasm"]

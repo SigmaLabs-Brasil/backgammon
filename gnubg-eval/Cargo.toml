@@ -9,4 +9,8 @@ rust-version.workspace = true
 [dependencies]
 gnubg-sys = { path = "../gnubg-sys" }
 gnubg-types = { path = "../gnubg-types" }
-rayon = "1.10"
+rayon = { version = "1.10", optional = true }
+
+[features]
+default = ["rayon"]
+wasm = []
