@@ -3,6 +3,7 @@
 pub mod classify;
 pub mod contact;
 pub mod crashed;
+pub mod cubeful;
 pub mod inputs;
 pub mod neuralnet;
 pub mod race;
@@ -40,6 +41,14 @@ impl EvalOutput {
             self.lose_gammon,
             self.lose_backgammon,
         ]
+    }
+
+    pub fn cubeless_equity(self) -> f32 {
+        cubeful::cubeless_equity(&self.outputs())
+    }
+
+    pub fn cubeful_equity(self, cube: &cubeful::CubeState) -> f32 {
+        cubeful::cubeful_equity(&self.outputs(), cube)
     }
 
     fn from_outputs(outputs: [f32; 5]) -> Self {

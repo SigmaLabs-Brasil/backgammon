@@ -82,6 +82,7 @@ pub struct EvalResult {
     pub lose_gammon: f32,
     pub lose_backgammon: f32,
     pub equity: f32,
+    pub cubeful_equity: f32,
     pub depth: u8,
     pub cache_hit: bool,
 }
@@ -89,8 +90,7 @@ pub struct EvalResult {
 impl EvalResult {
     fn from_raw(raw: RawEval, depth: u8, cache_hit: bool) -> Self {
         let [win, win_gammon, win_backgammon, lose_gammon, lose_backgammon] = raw.outputs;
-        let equity =
-            (2.0 * win - 1.0) + win_gammon + win_backgammon - lose_gammon - lose_backgammon;
+        let equity = gnubg_eval::cubeful::cubeless_equity(&raw.outputs);
         Self {
             win,
             win_gammon,
@@ -98,9 +98,22 @@ impl EvalResult {
             lose_gammon,
             lose_backgammon,
             equity,
+            cubeful_equity: equity,
             depth,
             cache_hit,
         }
+    }
+
+    pub fn with_cubeful(mut self, cube: &gnubg_eval::cubeful::CubeState) -> Self {
+        let outputs = [
+            self.win,
+            self.win_gammon,
+            self.win_backgammon,
+            self.lose_gammon,
+            self.lose_backgammon,
+        ];
+        self.cubeful_equity = gnubg_eval::cubeful::cubeful_equity(&outputs, cube);
+        self
     }
 }
 
@@ -339,6 +352,22 @@ mod tests {
         let moves = generate_candidate_moves(&board, (3, 1));
         let evaluated = parallel_eval_root(&board, &moves, 0).expect("root eval");
         assert_eq!(evaluated.len(), moves.len());
+    }
+
+    #[test]
+    fn eval_result_computes_cubeful_equity_from_cube_state() {
+        let raw = RawEval {
+            outputs: [0.55, 0.12, 0.03, 0.10, 0.02],
+        };
+        let eval =
+            EvalResult::from_raw(raw, 0, false).with_cubeful(&gnubg_eval::cubeful::CubeState {
+                value: 2,
+                owner: gnubg_eval::cubeful::CubeOwner::Player,
+                efficiency: 1.0,
+            });
+
+        assert!((eval.equity - 0.13).abs() < 1.0e-6);
+        assert!((eval.cubeful_equity - 0.26).abs() < 1.0e-6);
     }
 
     #[test]
