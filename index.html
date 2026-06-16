@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>backgammon-rust — WASM Engine</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #1a1a2e; color: #e0e0e0;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  display: flex; justify-content: center; align-items: flex-start;
+  min-height: 100vh; padding: 16px;
+}
+#app {
+  max-width: 820px; width: 100%;
+  display: flex; flex-direction: column; gap: 12px;
+}
+h1 { text-align: center; font-size: 1.3em; color: #f0d060; letter-spacing: 1px; }
+h1 small { font-size: 0.55em; color: #999; display: block; }
+
+/* Board canvas */
+#board-container {
+  position: relative; width: 100%; aspect-ratio: 2.05;
+  background: #2a1f0e; border-radius: 14px; border: 3px solid #5a3e1a;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+}
+canvas#board-canvas {
+  display: block; width: 100%; height: 100%; border-radius: 12px;
+}
+
+/* Controls */
+#controls {
+  display: flex; flex-wrap: wrap; gap: 8px;
+  align-items: center; justify-content: center;
+}
+#controls button, #controls select, #controls input {
+  background: #2d2d44; color: #ddd;
+  border: 1px solid #555; border-radius: 6px;
+  padding: 6px 14px; font-size: 0.9em; cursor: pointer;
+}
+#controls button:hover { background: #3d3d55; }
+#controls button:active { background: #4d4d66; }
+#controls button.primary { background: #4a7a2a; border-color: #6a9a3a; }
+#controls button.primary:hover { background: #5a8a3a; }
+#controls label { font-size: 0.85em; color: #aaa; }
+#dice-input { width: 52px; text-align: center; }
+#status-bar {
+  font-size: 0.9em; color: #ccc;
+  text-align: center; min-height: 1.4em;
+  padding: 4px 0;
+}
+
+/* Info panel */
+#info-panel {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 6px; background: #222; border-radius: 8px; padding: 10px 14px;
+  font-size: 0.85em;
+}
+#info-panel .stat { display: flex; justify-content: space-between; }
+#info-panel .stat .label { color: #888; }
+#info-panel .stat .value { color: #f0d060; font-weight: bold; font-variant-numeric: tabular-nums; }
+
+/* Move list */
+#move-history {
+  background: #222; border-radius: 8px; padding: 8px 12px;
+  max-height: 120px; overflow-y: auto; font-size: 0.8em;
+}
+#move-history div { padding: 2px 0; border-bottom: 1px solid #333; }
+#move-history .move-number { color: #666; margin-right: 6px; }
+
+@media (max-width: 600px) {
+  #controls { gap: 4px; }
+  #controls button, #controls select, #controls input { padding: 4px 8px; font-size: 0.8em; }
+  #info-panel { grid-template-columns: 1fr 1fr; font-size: 0.78em; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <h1>⚀ backgammon-rust <small>WASM Engine</small></h1>
+  <div id="board-container">
+    <canvas id="board-canvas"></canvas>
+  </div>
+  <div id="status-bar">Loading engine…</div>
+  <div id="controls">
+    <label>Dice</label>
+    <input type="text" id="dice-input" value="31" maxlength="2" placeholder="e.g. 31">
+    <button id="roll-btn" class="primary">🎲 Roll</button>
+    <button id="hint-btn">💡 Hint</button>
+    <button id="newgame-btn">🔄 New Game</button>
+    <button id="undo-btn">↩ Undo</button>
+    <label>Turn</label>
+    <select id="turn-select">
+      <option value="0" selected>Player (White)</option>
+      <option value="1">Player (Black)</option>
+    </select>
+  </div>
+  <div id="info-panel">
+    <div class="stat"><span class="label">Equity</span><span class="value" id="info-equity">—</span></div>
+    <div class="stat"><span class="label">Cubeful</span><span class="value" id="info-cubeful">—</span></div>
+    <div class="stat"><span class="label">Cube</span><span class="value" id="info-cube">1 (Center)</span></div>
+    <div class="stat"><span class="label">Cube Decision</span><span class="value" id="info-cube-decision">—</span></div>
+    <div class="stat"><span class="label">Engine</span><span class="value" id="info-engine">loading…</span></div>
+    <div class="stat"><span class="label">Position ID</span><span class="value" id="info-posid" style="font-size:0.7em;">—</span></div>
+  </div>
+  <div id="move-history"></div>
+</div>
+
+<script type="module">
+import init, {
+  init_engine, engine_info,
+  evaluate_position, best_move, analyze_position
+} from './wasm/gnubg_wasm.js';
+
+// ─── Position ID helpers ───────────────────────────────────────────────
+const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+
+function base64Encode(val) { return BASE64_CHARS[val & 0x3F]; }
+function base64Decode(ch) {
+  const idx = BASE64_CHARS.indexOf(ch);
+  return idx >= 0 ? idx : null;
+}
+
+/** Convert Board → 10-byte old-position key. */
+function boardToOldKey(board) {
+  const key = new Uint8Array(10);
+  let i_bit = 0;
+  for (let side = 0; side < 2; side++) {
+    for (let point = 0; point < 25; point++) {
+      const nc = board[side][point];
+      if (nc > 0) {
+        for (let j = 0; j < nc; j++) {
+          const k = (i_bit / 8) | 0;
+          const r = i_bit % 8;
+          if (k < 10) key[k] |= 1 << r;
+          i_bit++;
+        }
+        i_bit++; // separator 0 bit
+      } else {
+        i_bit++; // empty point: one 0 bit
+      }
+    }
+  }
+  return key;
+}
+
+/** Convert 10-byte old-position key → Board. */
+function oldKeyToBoard(key) {
+  const board = [[], []];
+  for (let s = 0; s < 2; s++) {
+    board[s] = new Array(25).fill(0);
+  }
+  let side = 0, point = 0;
+  for (let byteIdx = 0; byteIdx < key.length && side < 2; byteIdx++) {
+    const byte = key[byteIdx];
+    for (let bitIdx = 0; bitIdx < 8 && side < 2 && point < 25; bitIdx++) {
+      if ((byte >> bitIdx) & 1) {
+        board[side][point]++;
+      } else {
+        point++;
+        if (point === 25) { side++; point = 0; }
+      }
+    }
+  }
+  return board;
+}
+
+/** Encode a 10-byte key to a 14-char PositionID. */
+function encodePositionId(key) {
+  const out = new Array(14);
+  const bytes = key;
+  for (let i = 0; i < 3; i++) {
+    const chunk = i * 3;
+    out[i * 4]     = base64Encode(bytes[chunk] >> 2);
+    out[i * 4 + 1] = base64Encode(((bytes[chunk] & 0x03) << 4) | (bytes[chunk + 1] >> 4));
+    out[i * 4 + 2] = base64Encode(((bytes[chunk + 1] & 0x0F) << 2) | (bytes[chunk + 2] >> 6));
+    out[i * 4 + 3] = base64Encode(bytes[chunk + 2] & 0x3F);
+  }
+  out[12] = base64Encode(bytes[9] >> 2);
+  out[13] = base64Encode((bytes[9] & 0x03) << 4);
+  return out.join('');
+}
+
+/** Decode a 14-char PositionID to a 10-byte key. */
+function decodePositionId(s) {
+  if (s.length !== 14) return null;
+  const vals = new Array(14);
+  for (let i = 0; i < 14; i++) {
+    const v = base64Decode(s.charCodeAt(i));
+    if (v === null) return null;
+    vals[i] = v;
+  }
+  const decoded = new Uint8Array(10);
+  let outIdx = 0;
+  for (let i = 0; i < 3; i++) {
+    const src = i * 4;
+    decoded[outIdx]     = (vals[src] << 2) | (vals[src + 1] >> 4);
+    decoded[outIdx + 1] = (vals[src + 1] << 4) | (vals[src + 2] >> 2);
+    decoded[outIdx + 2] = (vals[src + 2] << 6) | vals[src + 3];
+    outIdx += 3;
+  }
+  decoded[9] = (vals[12] << 2) | (vals[13] >> 4);
+  return decoded;
+}
+
+/** Convert Board → PositionID. */
+function boardToPosId(board) {
+  return encodePositionId(boardToOldKey(board));
+}
+
+/** Convert PositionID → Board. */
+function posIdToBoard(id) {
+  const key = decodePositionId(id);
+  if (!key) return null;
+  return oldKeyToBoard(key);
+}
+
+// ─── Game State ─────────────────────────────────────────────────────────
+const OPENING_POS_ID = '4HPwATDgc/ABMA';
+
+let state = {
+  board: null,          // Board[[u32;25];2] after posId decoding
+  posId: OPENING_POS_ID,
+  turn: 0,              // 0 = white (player to move), 1 = black
+  dice: [3, 1],
+  selectedPoint: -1,    // -1 = nothing selected
+  history: [],          // [{posId, turn, dice, desc}]
+  cubeValue: 1,
+  cubeOwner: 0,         // 0=center, 1=white, 2=black
+};
+
+// Canvas references
+const canvas = document.getElementById('board-canvas');
+const ctx = canvas.getContext('2d');
+
+// ─── Board rendering ───────────────────────────────────────────────────
+const COLORS = {
+  bg: '#2a1f0e',
+  board: '#c8a86a',
+  boardLight: '#dbb980',
+  boardDark: '#a07850',
+  pointLight: '#e8d0a0',
+  pointDark: '#604020',
+  checkerWhite: '#f5f0e0',
+  checkerWhiteBorder: '#c0b090',
+  checkerBlack: '#1a1a1a',
+  checkerBlackBorder: '#555',
+  selected: '#00ff88',
+  hint: '#ffaa00',
+  home: '#3a6a3a33',
+  bar: '#5a3e1a',
+  textLight: '#222',
+  textDark: '#ddd',
+};
+
+let dpr = 1;
+
+function resizeCanvas() {
+  const rect = canvas.parentElement.getBoundingClientRect();
+  dpr = window.devicePixelRatio || 1;
+  const w = rect.width * dpr;
+  const h = rect.height * dpr;
+  canvas.width = w;
+  canvas.height = h;
+  canvas.style.width = rect.width + 'px';
+  canvas.style.height = rect.height + 'px';
+}
+
+const TOP_ROW_POINTS = [13,14,15,16,17,18,19,20,21,22,23,24];
+const BOTTOM_ROW_POINTS = [12,11,10,9,8,7,6,5,4,3,2,1];
+
+function getPointCoords(pointNum) {
+  // Returns {x, y, w, h} for a given point (1-24)
+  const W = canvas.width;
+  const H = canvas.height;
+  const margin = W * 0.025;
+  const barWidth = W * 0.055;
+  const usable = W - 2 * margin - barWidth;
+  const halfW = usable / 2;
+  const colW = halfW / 6;
+  const pointH = H * 0.40;
+  const topY = H * 0.06;
+  const botY = H * 0.54;
+
+  const idx = (pointNum - 1); // 0-based
+  const isTop = idx >= 12; // points 13-24 on top
+  const localIdx = isTop ? idx - 12 : idx;
+  const reversed = isTop ? localIdx : (11 - localIdx);
+
+  let x;
+  if (reversed < 6) {
+    // Left half
+    x = margin + reversed * colW;
+  } else {
+    // Right half (after bar)
+    x = margin + halfW + barWidth + (reversed - 6) * colW;
+  }
+
+  const w = colW * 0.85;
+  const y = isTop ? topY : botY;
+  const h = pointH;
+  return { x, y, w, h, isTop };
+}
+
+function renderBoard() {
+  resizeCanvas();
+  const W = canvas.width;
+  const H = canvas.height;
+  const board = state.board || posIdToBoard(OPENING_POS_ID);
+  if (!board) return;
+
+  // Background
+  ctx.fillStyle = COLORS.bg;
+  ctx.fillRect(0, 0, W, H);
+
+  // Board surface
+  const margin = W * 0.025;
+  const barWidth = W * 0.055;
+  const usable = W - 2 * margin - barWidth;
+  const halfW = usable / 2;
+  const boardTop = H * 0.03;
+  const boardH = H * 0.94;
+  ctx.fillStyle = COLORS.board;
+  roundRect(ctx, margin, boardTop, usable + barWidth, boardH, W * 0.025);
+  ctx.fill();
+
+  // Home board markers
+  ctx.fillStyle = COLORS.home;
+  // Top-right home (points 19-24)
+  const homeW = halfW / 2;
+  roundRect(ctx, margin + halfW + barWidth, boardTop, homeW, boardH, 0);
+  ctx.fill();
+  // Bottom-right home (points 1-6)
+  roundRect(ctx, margin + halfW + barWidth + homeW, boardTop, homeW, boardH, 0);
+  ctx.fill();
+
+  // Bar
+  ctx.fillStyle = COLORS.bar;
+  ctx.fillRect(margin + halfW, boardTop, barWidth, boardH);
+
+  // Inner board dividers
+  ctx.strokeStyle = '#8a6a3a';
+  ctx.lineWidth = 1;
+  const midX = margin + halfW;
+  ctx.beginPath();
+  ctx.moveTo(midX, boardTop);
+  ctx.lineTo(midX, boardTop + boardH);
+  ctx.stroke();
+
+  // Points
+  for (let p = 1; p <= 24; p++) {
+    const pc = getPointCoords(p);
+    const isLight = (p % 2 === 1);
+
+    // Triangle
+    ctx.beginPath();
+    const cx = pc.x + pc.w / 2;
+    const tipY = pc.isTop ? pc.y + pc.h : pc.y;
+    const baseY = pc.isTop ? pc.y : pc.y + pc.h;
+    ctx.moveTo(cx, tipY);
+    ctx.lineTo(pc.x, baseY);
+    ctx.lineTo(pc.x + pc.w, baseY);
+    ctx.closePath();
+
+    ctx.fillStyle = isLight ? COLORS.pointLight : COLORS.pointDark;
+    ctx.fill();
+    ctx.strokeStyle = isLight ? '#b09060' : '#402818';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    // Point number (tiny)
+    ctx.fillStyle = isLight ? '#8a6a3a' : '#b09060';
+    ctx.font = `${Math.max(8, W * 0.012)}px sans-serif`;
+    ctx.textAlign = 'center';
+    const numY = pc.isTop ? pc.y + pc.h + 14 : pc.y - 6;
+    const textY = pc.isTop ? Math.min(numY, H - 4) : Math.max(numY, 10);
+    ctx.fillText(String(p), cx, textY);
+  }
+
+  // Checkers
+  const CHECKER_RADIUS_FACTOR = 0.38;
+  for (let side = 0; side < 2; side++) {
+    const isOpponent = side === 1;
+    for (let point = 0; point < 25; point++) {
+      const count = board[side][point];
+      if (count === 0) continue;
+
+      let cx, cy, maxPerCol;
+
+      if (point === 24) {
+        // Bar
+        const barCX = margin + halfW + barWidth / 2;
+        const barCY = H * 0.48;
+        const spacing = Math.min(W * 0.028, H * 0.035);
+        maxPerCol = 5;
+        const cols = Math.ceil(count / maxPerCol);
+        const col = Math.floor((side * cols) / 2);
+        const offsetX = (col - (cols - 1) / 2) * spacing * 2.5;
+        const maxInCol = Math.min(count, maxPerCol);
+        for (let i = 0; i < count; i++) {
+          const ci = Math.floor(i / maxPerCol);
+          const ri = i % maxPerCol;
+          const yOff = (ri - (maxInCol - 1) / 2) * spacing;
+          cx = barCX + (ci - (cols - 1) / 2) * spacing * 2.5;
+          cy = barCY + yOff;
+          drawChecker(cx, cy, side === 0, count > 1 ? count : 0);
+        }
+        continue;
+      }
+
+      const p = point + 1;
+      const pc = getPointCoords(p);
+      const r = Math.min(pc.w * CHECKER_RADIUS_FACTOR, H * 0.035);
+      const spacing = r * 2.05;
+
+      const tipY = pc.isTop ? pc.y + pc.h : pc.y;
+      const baseY = pc.isTop ? pc.y : pc.y + pc.h;
+      const dir = pc.isTop ? -1 : 1;
+
+      maxPerCol = Math.floor(pc.h / spacing);
+      if (maxPerCol < 1) maxPerCol = 1;
+      const cols = Math.ceil(count / maxPerCol);
+
+      for (let i = 0; i < count; i++) {
+        const ci = Math.floor(i / maxPerCol);
+        const ri = i % maxPerCol;
+        const xOff = (ci - (cols - 1) / 2) * spacing * 1.1;
+        cx = pc.x + pc.w / 2 + xOff;
+        cy = tipY + dir * (ri * spacing + r);
+
+        const isSelected = (side === 0 && p === state.selectedPoint && state.turn === 0);
+        drawChecker(cx, cy, side === 0, count > 1 ? count : 0, isSelected);
+      }
+    }
+  }
+
+  // Turn indicator
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  ctx.font = `${Math.max(10, W * 0.016)}px sans-serif`;
+  ctx.textAlign = 'center';
+  const turnText = state.turn === 0 ? 'White to move' : 'Black to move';
+  ctx.fillText(turnText, W / 2, H * 0.50);
+
+  // Dice display
+  const diceY = H * 0.515;
+  const diceW = Math.min(W * 0.07, 40);
+  const diceH = diceW * 0.9;
+  const diceGap = 4 * dpr;
+  const totalDiceW = diceW * 2 + diceGap;
+  const diceStartX = (W - totalDiceW) / 2;
+
+  for (let di = 0; di < 2; di++) {
+    const dx = diceStartX + di * (diceW + diceGap);
+    const dy = diceY;
+    ctx.fillStyle = '#f5f0e0';
+    roundRect(ctx, dx, dy, diceW, diceH, 4 * dpr);
+    ctx.fill();
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1 * dpr;
+    ctx.stroke();
+    ctx.fillStyle = '#222';
+    ctx.font = `bold ${Math.max(10, diceW * 0.45)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(state.dice[di]), dx + diceW / 2, dy + diceH / 2);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function drawChecker(cx, cy, isWhite, count, isSelected) {
+  const r = Math.min(
+    Math.min(canvas.width * 0.018, canvas.height * 0.031),
+    14 * dpr
+  );
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = isWhite ? COLORS.checkerWhite : COLORS.checkerBlack;
+  ctx.fill();
+
+  if (isSelected) {
+    ctx.strokeStyle = COLORS.selected;
+    ctx.lineWidth = 3 * dpr;
+    ctx.stroke();
+  } else {
+    ctx.strokeStyle = isWhite ? COLORS.checkerWhiteBorder : COLORS.checkerBlackBorder;
+    ctx.lineWidth = 1 * dpr;
+    ctx.stroke();
+  }
+
+  // Checker highlight
+  if (!isWhite) {
+    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
+    grad.addColorStop(0, 'rgba(80,80,80,0.4)');
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    const grad = ctx.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
+    grad.addColorStop(0, 'rgba(255,255,255,0.5)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Count label if > 1
+  if (count > 1) {
+    ctx.fillStyle = isWhite ? COLORS.textLight : COLORS.textDark;
+    ctx.font = `bold ${Math.max(8, r * 0.9)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(count), cx, cy + 1);
+  }
+  ctx.textBaseline = 'alphabetic';
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ─── Game Logic ─────────────────────────────────────────────────────────
+
+function initGame() {
+  state.board = posIdToBoard(OPENING_POS_ID);
+  state.posId = OPENING_POS_ID;
+  state.turn = 0;
+  state.dice = [3, 1];
+  state.selectedPoint = -1;
+  state.history = [];
+  state.cubeValue = 1;
+  state.cubeOwner = 0;
+  updateUI();
+  evaluateCurrentPosition();
+}
+
+function updateUI() {
+  renderBoard();
+  document.getElementById('status-bar').textContent =
+    state.turn === 0 ? 'White (Player) to move' : 'Black (Opponent) to move';
+  document.getElementById('dice-input').value = state.dice.join('');
+  document.getElementById('info-posid').textContent = state.posId;
+  document.getElementById('turn-select').value = String(state.turn);
+  document.getElementById('info-cube').textContent =
+    `${state.cubeValue} (${['Center','Player','Opponent'][state.cubeOwner]})`;
+
+  // Move history
+  const histEl = document.getElementById('move-history');
+  histEl.innerHTML = state.history.map((h, i) =>
+    `<div><span class="move-number">#${i + 1}</span> ${h.desc}</div>`
+  ).join('');
+  if (state.history.length > 0) {
+    histEl.scrollTop = histEl.scrollHeight;
+  }
+}
+
+async function evaluateCurrentPosition() {
+  try {
+    const matchScore = null; // no match score for money play
+    const cubeVal = state.cubeValue;
+    const result = evaluate_position(state.posId, null, cubeVal);
+    if (result && result.error) {
+      document.getElementById('info-equity').textContent = 'ERR';
+      document.getElementById('info-cubeful').textContent = result.error;
+      document.getElementById('info-cube-decision').textContent = '—';
+      return;
+    }
+    document.getElementById('info-equity').textContent =
+      result.equity != null ? result.equity.toFixed(4) : '—';
+    document.getElementById('info-cubeful').textContent =
+      result.cubeful_equity != null ? result.cubeful_equity.toFixed(4) : '—';
+
+    if (result.cube_decision) {
+      const cd = result.cube_decision;
+      const actionLabels = { NoDouble: 'No Double', DoubleTake: 'Double / Take', DoubleDrop: 'Double / Drop' };
+      document.getElementById('info-cube-decision').textContent =
+        `${actionLabels[cd.action] || cd.action} (gain: ${cd.gain.toFixed(4)})`;
+    } else {
+      document.getElementById('info-cube-decision').textContent = 'N/A (cube not centered)';
+    }
+  } catch (e) {
+    document.getElementById('info-equity').textContent = 'ERR';
+    document.getElementById('info-cubeful').textContent = e.message;
+  }
+}
+
+function rollDice() {
+  if (state.board === null) return;
+  const a = Math.floor(Math.random() * 6) + 1;
+  const b = Math.floor(Math.random() * 6) + 1;
+  state.dice = [a, b];
+  document.getElementById('dice-input').value = `${a}${b}`;
+  state.selectedPoint = -1;
+  updateUI();
+}
+
+function newGame() {
+  initGame();
+}
+
+function undoMove() {
+  if (state.history.length === 0) return;
+  const prev = state.history.pop();
+  state.posId = prev.posId;
+  state.turn = prev.turn;
+  state.dice = prev.dice;
+  state.board = posIdToBoard(state.posId);
+  state.selectedPoint = -1;
+  updateUI();
+  evaluateCurrentPosition();
+}
+
+async function showHint() {
+  if (state.board === null) return;
+  try {
+    const dice = state.dice.join('');
+    const result = best_move(state.posId, dice, 0);
+    if (result && result.error) {
+      document.getElementById('status-bar').textContent = `Hint error: ${result.error}`;
+      return;
+    }
+    document.getElementById('status-bar').textContent =
+      `Best: ${result.notation}  (equity: ${result.equity.toFixed(4)})`;
+
+    // Highlight the source and destination
+    state.selectedPoint = result.from;
+    highlightHintMove(result.from, result.to);
+    renderBoard();
+
+    // Show move details in info
+    document.getElementById('info-equity').textContent = result.equity.toFixed(4);
+    if (result.cubeful_equity != null) {
+      document.getElementById('info-cubeful').textContent = result.cubeful_equity.toFixed(4);
+    }
+  } catch (e) {
+    document.getElementById('status-bar').textContent = `Hint error: ${e.message}`;
+  }
+}
+
+function highlightHintMove(from, to) {
+  // Draw a glowing arrow from source to destination
+  if (from === 0 || to === 0) return;
+  const fromPc = getPointCoords(from);
+  const toPc = getPointCoords(to);
+  const cx1 = fromPc.x + fromPc.w / 2;
+  const cy1 = fromPc.isTop ? fromPc.y + fromPc.h * 0.3 : fromPc.y + fromPc.h * 0.7;
+  const cx2 = toPc.x + toPc.w / 2;
+  const cy2 = toPc.isTop ? toPc.y + toPc.h * 0.7 : toPc.y + fromPc.h * 0.3;
+
+  ctx.save();
+  ctx.strokeStyle = COLORS.hint;
+  ctx.lineWidth = 3 * dpr;
+  ctx.shadowColor = COLORS.hint;
+  ctx.shadowBlur = 12 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(cx1, cy1);
+  ctx.lineTo(cx2, cy2);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ─── Canvas click handling ──────────────────────────────────────────────
+
+canvas.addEventListener('click', (e) => {
+  if (!state.board) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const mx = (e.clientX - rect.left) * scaleX;
+  const my = (e.clientY - rect.top) * scaleY;
+
+  // Check which point was clicked
+  let clickedPoint = -1;
+  for (let p = 1; p <= 24; p++) {
+    const pc = getPointCoords(p);
+    const cx = pc.x + pc.w / 2;
+    const r = pc.w * 0.4;
+    const tipY = pc.isTop ? pc.y + pc.h : pc.y;
+    const baseY = pc.isTop ? pc.y : pc.y + pc.h;
+
+    // Simple bounding box check
+    if (mx >= pc.x && mx <= pc.x + pc.w &&
+        my >= Math.min(tipY, baseY) && my <= Math.max(tipY, baseY)) {
+      clickedPoint = p;
+      break;
+    }
+  }
+
+  // Check bar click (center area)
+  const W = canvas.width;
+  const H = canvas.height;
+  const margin = W * 0.025;
+  const barWidth = W * 0.055;
+  const usable = W - 2 * margin - barWidth;
+  const halfW = usable / 2;
+  const barX = margin + halfW;
+  const barY = H * 0.06;
+  const barH = H * 0.88;
+  if (mx >= barX && mx <= barX + barWidth && my >= barY && my <= barY + barH) {
+    clickedPoint = 25; // bar
+  }
+
+  if (clickedPoint === -1) return;
+
+  // Determine active side
+  const activeSide = state.turn; // 0 = white (player), 1 = black
+
+  if (state.selectedPoint === -1) {
+    // Select a point - must have your checkers (for the active player)
+    if (state.board[activeSide][clickedPoint - 1] > 0) {
+      state.selectedPoint = clickedPoint;
+      renderBoard();
+      document.getElementById('status-bar').textContent =
+        `Selected point ${clickedPoint}. Click destination.`;
+    }
+  } else {
+    // Try to move from selectedPoint to clickedPoint
+    const fromPoint = state.selectedPoint;
+    const toPoint = clickedPoint;
+
+    const fromIdx = fromPoint === 25 ? 24 : fromPoint - 1;
+    const toIdx = toPoint === 25 ? 24 : toPoint - 1;
+
+    // Source must have checkers
+    if (state.board[activeSide][fromIdx] === 0) {
+      state.selectedPoint = -1;
+      renderBoard();
+      document.getElementById('status-bar').textContent = 'No checkers on source point.';
+      return;
+    }
+
+    // Destination: must not be blocked by 2+ opponent checkers
+    const oppSide = 1 - activeSide;
+    if (toPoint !== 25 && state.board[oppSide][toIdx] >= 2) {
+      state.selectedPoint = -1;
+      renderBoard();
+      document.getElementById('status-bar').textContent = 'Blocked! Opponent has 2+ checkers there.';
+      return;
+    }
+
+    // Save state for undo
+    state.history.push({
+      posId: state.posId,
+      turn: state.turn,
+      dice: [...state.dice],
+      desc: `${activeSide === 0 ? 'W' : 'B'} ${fromPoint}→${toPoint}`
+    });
+
+    // Execute move
+    state.board[activeSide][fromIdx]--;
+    if (state.board[oppSide][toIdx] === 1 && toPoint !== 25) {
+      // Hit! Move opponent's checker to bar (index 24)
+      state.board[oppSide][toIdx] = 0;
+      state.board[oppSide][24]++;
+    }
+    state.board[activeSide][toIdx]++;
+
+    // Update position ID
+    state.posId = boardToPosId(state.board);
+    state.selectedPoint = -1;
+
+    // Switch turn
+    state.turn = 1 - state.turn;
+
+    // Roll dice for next turn
+    const a = Math.floor(Math.random() * 6) + 1;
+    const b = Math.floor(Math.random() * 6) + 1;
+    state.dice = [a, b];
+    document.getElementById('dice-input').value = `${a}${b}`;
+
+    updateUI();
+    evaluateCurrentPosition();
+  }
+});
+
+// ─── Initialization ─────────────────────────────────────────────────────
+
+async function main() {
+  try {
+    await init();
+    const ok = init_engine();
+    if (!ok) {
+      document.getElementById('status-bar').textContent = '❌ Engine initialization failed!';
+      return;
+    }
+    document.getElementById('info-engine').textContent = engine_info() + ' ✅';
+    document.getElementById('status-bar').textContent = 'Engine ready. Click checkers to move!';
+    initGame();
+  } catch (e) {
+    document.getElementById('status-bar').textContent = `❌ Failed: ${e.message}`;
+    document.getElementById('info-engine').textContent = 'Error';
+  }
+}
+
+// ─── Event bindings ─────────────────────────────────────────────────────
+document.getElementById('roll-btn').addEventListener('click', rollDice);
+document.getElementById('newgame-btn').addEventListener('click', newGame);
+document.getElementById('undo-btn').addEventListener('click', undoMove);
+document.getElementById('hint-btn').addEventListener('click', showHint);
+document.getElementById('dice-input').addEventListener('change', (e) => {
+  const val = e.target.value.trim();
+  if (val.length === 2) {
+    const a = parseInt(val[0]);
+    const b = parseInt(val[1]);
+    if (a >= 1 && a <= 6 && b >= 1 && b <= 6) {
+      state.dice = [a, b];
+    }
+  }
+});
+document.getElementById('turn-select').addEventListener('change', (e) => {
+  state.turn = parseInt(e.target.value);
+  state.selectedPoint = -1;
+  updateUI();
+  evaluateCurrentPosition();
+});
+window.addEventListener('resize', () => { if (state.board) renderBoard(); });
+
+main();
+</script>
+</body>
+</html>

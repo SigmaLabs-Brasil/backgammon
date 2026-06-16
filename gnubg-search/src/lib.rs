@@ -9,6 +9,7 @@ pub use search::*;
 pub use transposition::*;
 
 use gnubg_sys::{decode_position_id, GnuBgError, PositionKey, RawEval};
+#[cfg(feature = "rayon")]
 use rayon::prelude::*;
 use std::cell::RefCell;
 use std::fmt;
@@ -293,23 +294,24 @@ pub fn parallel_eval_root(
         return Err(SearchError::EmptyMoveList);
     }
 
-    if moves.len() < ROOT_PARALLEL_THRESHOLD {
-        moves
-            .iter()
-            .map(|mv| {
-                evaluate_key_with_thread_cache(mv.resulting_position, depth)
-                    .map(|eval| (mv.clone(), eval))
-            })
-            .collect()
-    } else {
-        moves
+    #[cfg(feature = "rayon")]
+    if moves.len() >= ROOT_PARALLEL_THRESHOLD {
+        return moves
             .par_iter()
             .cloned()
             .map(|mv| {
                 evaluate_key_with_thread_cache(mv.resulting_position, depth).map(|eval| (mv, eval))
             })
-            .collect()
+            .collect();
     }
+
+    moves
+        .iter()
+        .map(|mv| {
+            evaluate_key_with_thread_cache(mv.resulting_position, depth)
+                .map(|eval| (mv.clone(), eval))
+        })
+        .collect()
 }
 
 pub fn best_move(
