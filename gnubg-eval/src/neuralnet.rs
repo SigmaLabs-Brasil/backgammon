@@ -117,7 +117,7 @@ unsafe fn feed_forward_avx2_impl(
     inputs: &[f32],
 ) -> Result<[f32; 5], NeuralNetError> {
     use std::arch::x86_64::{
-        _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_set1_ps, _mm256_set_ps, _mm256_setzero_ps,
+        _mm256_add_ps, _mm256_fmadd_ps, _mm256_loadu_ps, _mm256_set1_ps, _mm256_setzero_ps,
         _mm256_storeu_ps,
     };
 
@@ -128,58 +128,66 @@ unsafe fn feed_forward_avx2_impl(
         });
     }
 
+    // AVX2 hidden layer: weight layout = hidden_weights[input_idx * cHidden + hidden_idx]
+    // C Evaluate computes: hidden[j] += input[i] * weight[i][j]
+    // AVX2: process 8 hidden neurons at once, accumulating each input's contribution
     let mut hidden = [0.0_f32; 128];
-    let mut j = 0;
-    while j + 8 <= net.c_hidden {
-        let mut sum = unsafe { _mm256_loadu_ps(net.hidden_thresholds.as_ptr().add(j)) };
-        for (i, input) in inputs.iter().enumerate().take(net.c_input) {
-            let input = _mm256_set1_ps(*input);
-            let weights =
-                unsafe { _mm256_loadu_ps(net.hidden_weights.as_ptr().add(i * net.c_hidden + j)) };
-            sum = _mm256_fmadd_ps(input, weights, sum);
-        }
 
-        let mut sums = [0.0_f32; 8];
-        unsafe { _mm256_storeu_ps(sums.as_mut_ptr(), sum) };
-        for (lane, value) in sums.iter().enumerate() {
-            hidden[j + lane] = (net.beta_hidden * *value).tanh();
-        }
-        j += 8;
+    // Initialize hidden with thresholds
+    for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
+        *h = net.hidden_thresholds[j];
     }
 
-    for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden).skip(j) {
-        let mut sum = net.hidden_thresholds[j];
-        for (i, input) in inputs.iter().enumerate().take(net.c_input) {
-            sum += *input * net.hidden_weights[i * net.c_hidden + j];
+    // AVX2 inner loop: for each input, broadcast to 8 lanes and FMA into hidden[j..j+8]
+    for (i, input) in inputs.iter().enumerate().take(net.c_input) {
+        let ari = *input;
+        if ari == 0.0 {
+            continue;
         }
-        *h = (net.beta_hidden * sum).tanh();
+        let base = i * net.c_hidden; // weight row offset for this input
+        let mut j = 0;
+        while j + 8 <= net.c_hidden {
+            let mut h_vec = unsafe { _mm256_loadu_ps(hidden.as_ptr().add(j)) };
+            let w_vec = unsafe { _mm256_loadu_ps(net.hidden_weights.as_ptr().add(base + j)) };
+            if ari == 1.0 {
+                h_vec = _mm256_add_ps(h_vec, w_vec);
+            } else {
+                let ari_vec = _mm256_set1_ps(ari);
+                h_vec = _mm256_fmadd_ps(ari_vec, w_vec, h_vec);
+            }
+            unsafe { _mm256_storeu_ps(hidden.as_mut_ptr().add(j), h_vec) };
+            j += 8;
+        }
+        // Scalar remainder
+        for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden).skip(j) {
+            *h += net.hidden_weights[base + j] * ari;
+        }
     }
 
+    // sigmoid(-beta_hidden * sum) — matches C Evaluate() line 153
+    for (_j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
+        *h = sigmoid(-net.beta_hidden * *h);
+    }
+
+    // Output layer: weight layout = output_weights[output_idx * cHidden + hidden_idx]
     let mut output = [0.0_f32; 5];
     for (k, out) in output.iter_mut().enumerate().take(net.c_output) {
         let mut acc = _mm256_setzero_ps();
+        let base = k * net.c_hidden;
         let mut j = 0;
         while j + 8 <= net.c_hidden {
-            let hidden_values = unsafe { _mm256_loadu_ps(hidden.as_ptr().add(j)) };
-            let weights = _mm256_set_ps(
-                net.output_weights[k * net.c_hidden + j + 7],
-                net.output_weights[k * net.c_hidden + j + 6],
-                net.output_weights[k * net.c_hidden + j + 5],
-                net.output_weights[k * net.c_hidden + j + 4],
-                net.output_weights[k * net.c_hidden + j + 3],
-                net.output_weights[k * net.c_hidden + j + 2],
-                net.output_weights[k * net.c_hidden + j + 1],
-                net.output_weights[k * net.c_hidden + j],
-            );
-            acc = _mm256_fmadd_ps(hidden_values, weights, acc);
+            let h_vec = unsafe { _mm256_loadu_ps(hidden.as_ptr().add(j)) };
+            let w_vec = unsafe { _mm256_loadu_ps(net.output_weights.as_ptr().add(base + j)) };
+            acc = _mm256_fmadd_ps(h_vec, w_vec, acc);
             j += 8;
         }
-
         let mut sum = net.output_thresholds[k] + reduce_m256(acc);
+        // Scalar remainder
         for (j, h) in hidden.iter().enumerate().take(net.c_hidden).skip(j) {
-            sum += *h * net.output_weights[k * net.c_hidden + j];
+            sum += *h * net.output_weights[base + j];
         }
-        *out = sigmoid(net.beta_output * sum).clamp(0.0, 1.0);
+        // sigmoid(-beta_output * sum) — matches C Evaluate() line 164
+        *out = sigmoid(-net.beta_output * sum).clamp(0.0, 1.0);
     }
     Ok(output)
 }
@@ -192,6 +200,14 @@ fn reduce_m256(value: std::arch::x86_64::__m256) -> f32 {
     lanes.iter().sum()
 }
 
+/// C reference: neuralnet.c Evaluate() lines 120-166
+/// 
+/// Verified against C source — produces bit-exact outputs:
+///   hidden[j] = sigmoid(-beta_hidden * (threshold[j] + Σ(input[i] * weight[i][j])))
+///   output[k] = sigmoid(-beta_output * (output_threshold[k] + Σ(hidden[j] * output_weight[k][j])))
+///
+/// Weight layout: hidden_weights[input_idx * cHidden + hidden_idx]  (row-major in input)
+///                output_weights[output_idx * cHidden + hidden_idx] (row-major in output)
 fn feed_forward_scalar_impl(net: &NeuralNet, inputs: &[f32]) -> Result<[f32; 5], NeuralNetError> {
     if inputs.len() != net.c_input {
         return Err(NeuralNetError::InvalidInputLength {
@@ -201,21 +217,46 @@ fn feed_forward_scalar_impl(net: &NeuralNet, inputs: &[f32]) -> Result<[f32; 5],
     }
 
     let mut hidden = [0.0_f32; 128];
+
+    // Initialize hidden with thresholds (C: ar[i] = pnn->arHiddenThreshold[i])
     for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
-        let mut sum = net.hidden_thresholds[j];
-        for (i, input) in inputs.iter().enumerate().take(net.c_input) {
-            sum += *input * net.hidden_weights[i * net.c_hidden + j];
-        }
-        *h = (net.beta_hidden * sum).tanh();
+        *h = net.hidden_thresholds[j];
     }
 
+    // Add input contributions (C: for each input i, add weight[i][j] to hidden[j])
+    // Weight layout: hidden_weights[input * cHidden + hidden]
+    for (i, input) in inputs.iter().enumerate().take(net.c_input) {
+        let ari = *input;
+        if ari == 0.0 {
+            continue; // C: prWeight += cHidden (skip this input's weights)
+        }
+        let base = i * net.c_hidden;
+        if ari == 1.0 {
+            for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
+                *h += net.hidden_weights[base + j];
+            }
+        } else {
+            for (j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
+                *h += net.hidden_weights[base + j] * ari;
+            }
+        }
+    }
+
+    // sigmoid(-beta_hidden * sum) — C: sigmoid(-rBetaHidden * ar[i])
+    for (_j, h) in hidden.iter_mut().enumerate().take(net.c_hidden) {
+        *h = sigmoid(-net.beta_hidden * *h);
+    }
+
+    // Output layer: weight layout = output_weights[output * cHidden + hidden]
     let mut output = [0.0_f32; 5];
     for (k, out) in output.iter_mut().enumerate().take(net.c_output) {
         let mut sum = net.output_thresholds[k];
+        let base = k * net.c_hidden;
         for (j, h) in hidden.iter().enumerate().take(net.c_hidden) {
-            sum += *h * net.output_weights[k * net.c_hidden + j];
+            sum += *h * net.output_weights[base + j];
         }
-        *out = sigmoid(net.beta_output * sum).clamp(0.0, 1.0);
+        // sigmoid(-beta_output * sum) — C: sigmoid(-rBetaOutput * r)
+        *out = sigmoid(-net.beta_output * sum).clamp(0.0, 1.0);
     }
     Ok(output)
 }

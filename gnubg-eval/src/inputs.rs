@@ -7,7 +7,6 @@ pub const BOARD_POINTS: usize = 25;
 pub const BASE_INPUTS: usize = 96;
 pub const BASE_INPUTS_FULL: usize = BOARD_POINTS * MINPPERPOINT;
 pub const MORE_INPUTS: usize = 25;
-
 pub const I_OFF1: usize = 0;
 pub const I_BREAK_CONTACT: usize = 3;
 pub const I_BACK_CHEQUER: usize = 4;
@@ -38,17 +37,6 @@ pub fn base_inputs(board: &Board, side: usize) -> [f32; BASE_INPUTS] {
         encode_point(
             board[side][point],
             &mut out[(point - 1) * MINPPERPOINT..point * MINPPERPOINT],
-        );
-    }
-    out
-}
-
-pub(crate) fn base_inputs_full(board: &Board, side: usize) -> [f32; BASE_INPUTS_FULL] {
-    let mut out = [0.0; BASE_INPUTS_FULL];
-    for point in 0..25 {
-        encode_point(
-            board[side][point],
-            &mut out[point * MINPPERPOINT..(point + 1) * MINPPERPOINT],
         );
     }
     out
