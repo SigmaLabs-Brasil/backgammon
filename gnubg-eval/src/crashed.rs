@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use crate::inputs::{
-    base_inputs, calculate_half_inputs_for, men_off_all, BASE_INPUTS, BASE_INPUTS_FULL, I_OFF1,
+    base_inputs, calculate_half_inputs_for, men_off_all, BASE_INPUTS_FULL, I_OFF1,
     MORE_INPUTS,
 };
 use gnubg_types::Board;
@@ -10,9 +10,14 @@ pub const CRASHED_INPUTS: usize = (BASE_INPUTS_FULL + MORE_INPUTS) * 2;
 
 pub fn calculate_crashed_inputs(board: &Board) -> [f32; CRASHED_INPUTS] {
     let mut inputs = [0.0_f32; CRASHED_INPUTS];
-    let base0 = base_inputs(board, 0);
-    inputs[..BASE_INPUTS].copy_from_slice(&base0);
 
+    // Encode base inputs for both sides (25 points × 4 slots each = 100 per side)
+    let base0 = base_inputs(board, 0);
+    inputs[..BASE_INPUTS_FULL].copy_from_slice(&base0);
+    let base1 = base_inputs(board, 1);
+    inputs[BASE_INPUTS_FULL..2 * BASE_INPUTS_FULL].copy_from_slice(&base1);
+
+    // Half inputs (25 features per side)
     let first = BASE_INPUTS_FULL * 2;
     let second = first + MORE_INPUTS;
     let mut half_first = calculate_half_inputs_for(&board[1], &board[0]);

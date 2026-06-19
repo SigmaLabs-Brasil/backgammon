@@ -4,7 +4,7 @@ use gnubg_types::Board;
 
 pub const MINPPERPOINT: usize = 4;
 pub const BOARD_POINTS: usize = 25;
-pub const BASE_INPUTS: usize = 96;
+pub const BASE_INPUTS: usize = 100;
 pub const BASE_INPUTS_FULL: usize = BOARD_POINTS * MINPPERPOINT;
 pub const MORE_INPUTS: usize = 25;
 pub const I_OFF1: usize = 0;
@@ -33,10 +33,10 @@ pub const I_BACKRESCAPES: usize = 24;
 
 pub fn base_inputs(board: &Board, side: usize) -> [f32; BASE_INPUTS] {
     let mut out = [0.0; BASE_INPUTS];
-    for point in 1..=24 {
+    for point in 0..=24 {
         encode_point(
             board[side][point],
-            &mut out[(point - 1) * MINPPERPOINT..point * MINPPERPOINT],
+            &mut out[(point) * MINPPERPOINT..(point + 1) * MINPPERPOINT],
         );
     }
     out
@@ -411,9 +411,9 @@ mod tests {
     }
 
     #[test]
-    fn one_checker_sets_first_slot() {
+    fn one_checker_on_bar_sets_first_slot() {
         let mut b = [[0_u32; 25]; 2];
-        b[0][1] = 1;
+        b[0][0] = 1; // bar (point 0)
         let inputs = base_inputs(&b, 0);
         assert_eq!(&inputs[0..4], &[1.0, 0.0, 0.0, 0.0]);
     }
@@ -423,7 +423,7 @@ mod tests {
         let mut b = [[0_u32; 25]; 2];
         b[0][6] = 5;
         let inputs = base_inputs(&b, 0);
-        let offset = (6 - 1) * 4;
+        let offset = 6 * 4; // point 6 starts at slot 24
         assert_eq!(&inputs[offset..offset + 4], &[1.0, 1.0, 1.0, 0.5]);
     }
 

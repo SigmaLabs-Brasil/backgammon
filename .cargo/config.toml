@@ -1,5 +1,9 @@
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "target-cpu=x86-64-v3"]
 
+[target.x86_64-pc-windows-gnu]
+linker = "/tmp/llvm-mingw-fresh/llvm-mingw-20250114-ucrt-ubuntu-20.04-x86_64/bin/ld-wrap"
+ar = "/tmp/llvm-mingw-fresh/llvm-mingw-20250114-ucrt-ubuntu-20.04-x86_64/bin/x86_64-w64-mingw32-ar"
+
 [env]
 CARGO_PROFILE_RELEASE_DEBUG = "false"
