@@ -32,14 +32,18 @@ fn contact_network_zero_input_matches_c_reference() {
         .feed_forward_scalar(&inputs)
         .expect("zero input evaluates");
 
-    assert_outputs_close(output, [1.0, 0.0, 1.0, 0.0, 0.0], 1e-6);
+    assert_outputs_close(output, [2.8418822e-10, 1.0, 0.99779165, 1.0, 1.0], 1e-6);
 }
 
 #[test]
-fn opening_position_matches_post_sanity_check_smoke_values() {
+fn opening_position_matches_reference_values() {
     let output = evaluate_position_id("4HPwATDgc/ABMA");
 
-    assert_outputs_close(output, [1.0, 0.0, 0.0, 0.0, 0.0], 1e-4);
+    assert_outputs_close(
+        output,
+        [0.5241981, 0.1494448, 0.007605765, 0.11916725, 0.007472411],
+        1e-4,
+    );
 }
 
 #[test]

@@ -201,8 +201,8 @@ fn reduce_m256(value: std::arch::x86_64::__m256) -> f32 {
 }
 
 /// C reference: neuralnet.c Evaluate() lines 120-166
-/// 
-/// Verified against C source — produces bit-exact outputs:
+///
+/// Verified against C source:
 ///   hidden[j] = sigmoid(-beta_hidden * (threshold[j] + Σ(input[i] * weight[i][j])))
 ///   output[k] = sigmoid(-beta_output * (output_threshold[k] + Σ(hidden[j] * output_weight[k][j])))
 ///
@@ -263,26 +263,17 @@ fn feed_forward_scalar_impl(net: &NeuralNet, inputs: &[f32]) -> Result<[f32; 5],
 
 #[inline]
 fn sigmoid(x: f32) -> f32 {
-    // Polynomial approximation of σ(x) = 1/(1+exp(-x))
-    // Uses a 6th-order minimax polynomial on [-8, 8]
-    // Avoids expensive exp() call entirely.
-    if x <= -8.0 {
-        return 0.0;
-    }
-    if x >= 8.0 {
+    // GNU Backgammon's neuralnet.c sigmoid is the decreasing logistic
+    // 1 / (1 + exp(x)). NeuralNetEvaluate calls it with -beta * sum.
+    // Using the conventional increasing logistic here flips every neuron and
+    // saturates real gnubg weights to [1, 0, 1, 0, 0].
+    if x <= -40.0 {
         return 1.0;
     }
-    let x2 = x * x;
-    // σ(x) ≈ 0.5 + x*(0.19935178 + x2*(-0.00396576 + x2*0.00003573))
-    // Clipped to [0, 1] at the call sites already, but clamp here too for safety.
-    let result = 0.5 + x * (0.19935178 + x2 * (-0.00396576 + x2 * 0.00003573));
-    if result < 0.0 {
-        0.0
-    } else if result > 1.0 {
-        1.0
-    } else {
-        result
+    if x >= 40.0 {
+        return 0.0;
     }
+    (1.0 / (1.0 + x.exp())).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
