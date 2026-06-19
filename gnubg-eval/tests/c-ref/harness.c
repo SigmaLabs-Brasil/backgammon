@@ -10,7 +10,10 @@
 #define cInput 250
 #define cOutput 5
 
-float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
+float sigmoid(float x) {
+    // Matches gnubg/lib/neuralnet.c: decreasing logistic 1 / (1 + exp(x)).
+    return 1.0f / (1.0f + expf(x));
+}
 
 int main() {
     // Load the first network from the weight file
